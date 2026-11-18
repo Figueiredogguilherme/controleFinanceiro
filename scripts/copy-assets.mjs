@@ -16,6 +16,10 @@ const copies = [
     dest: path.join(publicDir, 'sql-wasm.wasm'),
   },
   {
+    src: path.join(rootDir, 'node_modules', 'sql.js', 'dist', 'sql-wasm-browser.wasm'),
+    dest: path.join(publicDir, 'sql-wasm-browser.wasm'),
+  },
+  {
     src: path.join(rootDir, 'node_modules', 'pdfjs-dist', 'build', 'pdf.worker.min.mjs'),
     dest: path.join(publicDir, 'pdf.worker.min.mjs'),
   },

@@ -96,9 +96,13 @@ export async function saveBytesToIndexedDb(bytes: Uint8Array): Promise<void> {
 
 async function ensureSqlModule(): Promise<SqlJsStatic> {
   if (!sqlModule) {
-    sqlModule = await initSqlJs({
-      locateFile: (file: string) => `./${file}`,
-    });
+    sqlModule = await initSqlJs(
+      typeof window !== 'undefined'
+        ? {
+            locateFile: (file: string) => new URL(file, document.baseURI).href,
+          }
+        : undefined,
+    );
   }
   return sqlModule;
 }
