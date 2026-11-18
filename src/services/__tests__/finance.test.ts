@@ -21,6 +21,14 @@ import {
   DEFAULT_DRIVE_FOLDER_ID,
   getDriveFolderUrl,
 } from '../googleDrive';
+import { extractPluggyItemIds } from '../openFinancePluggy';
+import {
+  getBankAccounts,
+  getSettings,
+  hasDemoSeedData,
+  initDatabase,
+  removeDemoSeedData,
+} from '../database';
 
 describe('Parser Banco do Brasil (OFX e CSV)', () => {
   it('interpreta corretamente o OFX de exemplo do Banco do Brasil com FITID e categorias', () => {
@@ -92,7 +100,6 @@ describe('Motor Financeiro e Simulador de Investimentos', () => {
     expect(getIofRateForDays(15)).toBe(0.5);
     expect(getIofRateForDays(30)).toBe(0);
 
-    // LCI 93% CDI com IR de 15% (>720 dias) equivale a ~109.41% do CDI bruto
     expect(computeCdbEquivalentPercent(93, 1000)).toBeCloseTo(109.41, 1);
   });
 
@@ -114,7 +121,7 @@ describe('Motor Financeiro e Simulador de Investimentos', () => {
       applyIncomeTax: true,
     });
 
-    expect(out.points).toHaveLength(6); // Hoje + Anos 1..5
+    expect(out.points).toHaveLength(6);
     const last = out.points[5];
     expect(last.totalInvested).toBe(90000);
     expect(last.cdbNetNominal).toBeGreaterThan(last.totalInvested);
@@ -125,6 +132,32 @@ describe('Motor Financeiro e Simulador de Investimentos', () => {
     const lciSummary = out.summaries.find((s) => s.id === 'lci')!;
     expect(cdbSummary.taxPaid).toBeGreaterThan(0);
     expect(lciSummary.taxPaid).toBe(0);
+  });
+});
+
+describe('Pluggy UUID Extractor & SQLite Database Lifecycle', () => {
+  it('extrai UUIDs válidos mesmo de URLs coladas do painel Pluggy', () => {
+    const ids = extractPluggyItemIds(
+      'https://dashboard.pluggy.ai/items/d290f1ee-6c54-4b01-90e6-d701748f0851, 4a8b9c10-1234-4321-8888-abcdef012345',
+    );
+    expect(ids).toEqual([
+      'd290f1ee-6c54-4b01-90e6-d701748f0851',
+      '4a8b9c10-1234-4321-8888-abcdef012345',
+    ]);
+  });
+
+  it('inicializa SQLite com contas demo, configura gemini-3.8-flash e permite limpar dados demo', async () => {
+    await initDatabase();
+    const cfg = getSettings();
+    expect(cfg.geminiModel).toBe('gemini-3.8-flash');
+    expect(cfg.driveFolderId).toBe('1AL3UC1Jv5-cUbQv6et1vY0AoH712jMg4');
+
+    expect(hasDemoSeedData()).toBe(true);
+    expect(getBankAccounts().length).toBeGreaterThanOrEqual(2);
+
+    await removeDemoSeedData();
+    expect(hasDemoSeedData()).toBe(false);
+    expect(getBankAccounts()).toHaveLength(0);
   });
 });
 

@@ -11,6 +11,8 @@ import {
   Link2,
   Copy,
   Check,
+  RefreshCw,
+  ExternalLink,
 } from 'lucide-react';
 import {
   AppSettings,
@@ -35,12 +37,20 @@ import {
   generateSampleBbOfx,
   generateSampleMercedesPayslipText,
 } from '../services/parsers/sampleGenerator';
-import { syncBancoDoBrasilViaPluggy } from '../services/openFinancePluggy';
+import {
+  openPluggyConnectWidget,
+  triggerPluggyItemRefresh,
+} from '../services/openFinancePluggy';
 import { formatBRL } from '../services/financialEngine';
 
 interface IngestionViewProps {
   settings: AppSettings;
   payslips: Payslip[];
+  isSyncingPluggy: boolean;
+  pluggySyncLogs: string[];
+  pluggySyncError: string | null;
+  onRunPluggyFullSync: (removeDemoFirst?: boolean) => Promise<void>;
+  onSavePluggyItemIdAndSync: (newItemId: string) => Promise<void>;
   onImportTransactions: (
     items: Omit<Transaction, 'id' | 'createdAt'>[],
   ) => Promise<{ inserted: number; skippedDuplicates: number }>;
@@ -56,6 +66,11 @@ interface IngestionViewProps {
 export const IngestionView: React.FC<IngestionViewProps> = ({
   settings,
   payslips,
+  isSyncingPluggy,
+  pluggySyncLogs,
+  pluggySyncError,
+  onRunPluggyFullSync,
+  onSavePluggyItemIdAndSync,
   onImportTransactions,
   onAddPayslip,
   onDeletePayslip,
@@ -63,12 +78,15 @@ export const IngestionView: React.FC<IngestionViewProps> = ({
 }) => {
   const [bbDraft, setBbDraft] = useState<Omit<Transaction, 'id' | 'createdAt'>[]>([]);
   const [bbStatus, setBbStatus] = useState<{ type: 'ok' | 'err'; msg: string } | null>(null);
-  const [pluggyLoading, setPluggyLoading] = useState(false);
+  const [cleanDemoOnSync, setCleanDemoOnSync] = useState(true);
+  const [widgetLoading, setWidgetLoading] = useState(false);
 
   const [payslipRawText, setPayslipRawText] = useState('');
   const [payslipDraft, setPayslipDraft] = useState<ParsedPayslipDraft | null>(null);
   const [createSalaryTx, setCreateSalaryTx] = useState(true);
-  const [payslipStatus, setPayslipStatus] = useState<{ type: 'ok' | 'err'; msg: string } | null>(null);
+  const [payslipStatus, setPayslipStatus] = useState<{ type: 'ok' | 'err'; msg: string } | null>(
+    null,
+  );
   const [pdfParsing, setPdfParsing] = useState(false);
   const [copiedBookmarklet, setCopiedBookmarklet] = useState(false);
 
@@ -79,6 +97,57 @@ export const IngestionView: React.FC<IngestionViewProps> = ({
   const [manualType, setManualType] = useState<TransactionType>('expense');
   const [manualCat, setManualCat] = useState('Alimentação');
   const [manualStatus, setManualStatus] = useState<string | null>(null);
+
+  const hasPluggyKeys = Boolean(
+    settings.pluggyClientId.trim() && settings.pluggyClientSecret.trim(),
+  );
+  const hasPluggyItem = Boolean(settings.pluggyItemId.trim());
+
+  const handleOpenPluggyWidget = async () => {
+    setWidgetLoading(true);
+    setBbStatus(null);
+    try {
+      await openPluggyConnectWidget({
+        clientId: settings.pluggyClientId,
+        clientSecret: settings.pluggyClientSecret,
+        existingItemId: settings.pluggyItemId,
+        onItemConnected: async (newItemId, institutionName) => {
+          setBbStatus({
+            type: 'ok',
+            msg: `Conta ${institutionName ?? 'Banco do Brasil'} conectada (Item ID: ${newItemId})! Sincronizando dados...`,
+          });
+          await onSavePluggyItemIdAndSync(newItemId);
+        },
+      });
+    } catch (err) {
+      setBbStatus({
+        type: 'err',
+        msg: err instanceof Error ? err.message : 'Erro ao abrir Widget Pluggy Connect.',
+      });
+    } finally {
+      setWidgetLoading(false);
+    }
+  };
+
+  const handleForceRefreshPluggyItem = async () => {
+    setBbStatus(null);
+    try {
+      const status = await triggerPluggyItemRefresh({
+        clientId: settings.pluggyClientId,
+        clientSecret: settings.pluggyClientSecret,
+        itemId: settings.pluggyItemId,
+      });
+      setBbStatus({
+        type: 'ok',
+        msg: `Atualização bancária solicitada à Pluggy (Status: ${status.status}). Clique em "Sincronizar Tudo Agora" em alguns instantes.`,
+      });
+    } catch (err) {
+      setBbStatus({
+        type: 'err',
+        msg: err instanceof Error ? err.message : 'Erro ao solicitar atualização do Item.',
+      });
+    }
+  };
 
   const handleBbFileUpload = async (file: File) => {
     setBbStatus(null);
@@ -99,7 +168,7 @@ export const IngestionView: React.FC<IngestionViewProps> = ({
       setBbDraft(parsed);
       setBbStatus({
         type: 'ok',
-        msg: `${parsed.length} transações identificadas em "${file.name}". Revise abaixo e clique em Confirmar Importação.`,
+        msg: `${parsed.length} transações identificadas em "${file.name}". Revise abaixo ou clique em Confirmar Importação.`,
       });
     } catch (err) {
       setBbStatus({
@@ -117,34 +186,6 @@ export const IngestionView: React.FC<IngestionViewProps> = ({
       type: 'ok',
       msg: `Importação concluída: ${res.inserted} novas transações gravadas no SQLite (${res.skippedDuplicates} duplicadas ignoradas).`,
     });
-  };
-
-  const handlePluggySync = async () => {
-    setPluggyLoading(true);
-    setBbStatus(null);
-    try {
-      const res = await syncBancoDoBrasilViaPluggy({
-        clientId: settings.pluggyClientId,
-        clientSecret: settings.pluggyClientSecret,
-        itemId: settings.pluggyItemId,
-      });
-      if (res.transactions.length === 0) {
-        setBbStatus({ type: 'ok', msg: 'Conexão Pluggy bem-sucedida, mas nenhuma transação nova retornada.' });
-      } else {
-        setBbDraft(res.transactions);
-        setBbStatus({
-          type: 'ok',
-          msg: `${res.transactions.length} lançamentos recebidos via Open Finance (Pluggy). Confirme a importação abaixo.`,
-        });
-      }
-    } catch (err) {
-      setBbStatus({
-        type: 'err',
-        msg: err instanceof Error ? err.message : 'Erro ao sincronizar com Open Finance Pluggy.',
-      });
-    } finally {
-      setPluggyLoading(false);
-    }
   };
 
   const handlePayslipPdfUpload = async (file: File) => {
@@ -172,10 +213,16 @@ export const IngestionView: React.FC<IngestionViewProps> = ({
     }
   };
 
-  const handleParseTextPayslip = (textToParse: string, source: DataSource = 'mercedes_holerite_pdf') => {
+  const handleParseTextPayslip = (
+    textToParse: string,
+    source: DataSource = 'mercedes_holerite_pdf',
+  ) => {
     setPayslipStatus(null);
     if (!textToParse.trim()) {
-      setPayslipStatus({ type: 'err', msg: 'Cole o texto do holerite ou carregue um PDF primeiro.' });
+      setPayslipStatus({
+        type: 'err',
+        msg: 'Cole o texto do holerite ou carregue um PDF primeiro.',
+      });
       return;
     }
     const draft = parseMercedesPayslipText(textToParse, source);
@@ -218,12 +265,136 @@ export const IngestionView: React.FC<IngestionViewProps> = ({
     setTimeout(() => setManualStatus(null), 3000);
   };
 
-  const mercedesBookmarkletCode = `javascript:(function(){const txt=document.body.innerText;navigator.clipboard.writeText(txt).then(()=>alert('Texto do Holerite copiado! Cole na aba Ingestao BB & RH do Assistente Financeiro.')).catch(()=>prompt('Copie o texto abaixo:',txt.slice(0,2500)));})();`;
+  const mercedesBookmarkletCode = `javascript:(function(){const txt=document.body.innerText;navigator.clipboard.writeText(txt).then(()=>alert('Texto do Holerite copiado! Cole na aba Extrato BB & Holerite MB do Assistente Financeiro.')).catch(()=>prompt('Copie o texto abaixo:',txt.slice(0,2500)));})();`;
 
   return (
     <div className="space-y-6">
+      {/* Pluggy Open Finance Dedicated Hero Card */}
+      <div className="glass-card border-cyan-500/30 p-6">
+        <div className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
+          <div className="flex items-start gap-3.5">
+            <div className="flex h-12 w-12 shrink-0 items-center justify-center rounded-2xl bg-cyan-500/15 text-cyan-400">
+              <Link2 className="h-6 w-6" />
+            </div>
+            <div>
+              <div className="flex flex-wrap items-center gap-2">
+                <h2 className="text-lg font-bold text-white">
+                  Sincronização Automática Open Finance (Pluggy — Banco do Brasil)
+                </h2>
+                {hasPluggyKeys && hasPluggyItem ? (
+                  <span className="badge-emerald">Credenciais Configuradas</span>
+                ) : (
+                  <span className="badge-amber">Configuração Pendente</span>
+                )}
+              </div>
+              <p className="mt-1 text-xs text-slate-300">
+                Importa automaticamente <strong>Saldos de Contas Correntes</strong>,{' '}
+                <strong>Faturas de Cartão Ourocard</strong>, <strong>Extrato Completo</strong> e{' '}
+                <strong>Carteira de Investimentos</strong> direto para o seu banco SQLite.
+              </p>
+            </div>
+          </div>
+
+          <div className="flex flex-wrap items-center gap-2.5">
+            {hasPluggyKeys && hasPluggyItem && (
+              <button
+                type="button"
+                onClick={() => onRunPluggyFullSync(cleanDemoOnSync)}
+                disabled={isSyncingPluggy}
+                className="btn-primary"
+              >
+                <RefreshCw className={`h-4 w-4 ${isSyncingPluggy ? 'animate-spin' : ''}`} />
+                <span>
+                  {isSyncingPluggy
+                    ? 'Buscando Dados na Pluggy...'
+                    : 'Sincronizar Tudo Agora (Contas + Extrato + Ativos)'}
+                </span>
+              </button>
+            )}
+
+            {hasPluggyKeys && (
+              <button
+                type="button"
+                onClick={handleOpenPluggyWidget}
+                disabled={widgetLoading}
+                className="btn-secondary text-xs"
+              >
+                <ExternalLink className="h-4 w-4 text-cyan-400" />
+                <span>
+                  {widgetLoading
+                    ? 'Abrindo Pluggy Connect...'
+                    : hasPluggyItem
+                      ? 'Conectar Outra Conta / Atualizar via Widget'
+                      : 'Abrir Widget Pluggy Connect (Conectar BB)'}
+                </span>
+              </button>
+            )}
+
+            {hasPluggyKeys && hasPluggyItem && (
+              <button
+                type="button"
+                onClick={handleForceRefreshPluggyItem}
+                className="btn-secondary text-xs"
+                title="Pede para a Pluggy atualizar os dados junto ao Banco do Brasil"
+              >
+                Forçar Refresh Bancário
+              </button>
+            )}
+
+            {(!hasPluggyKeys || !hasPluggyItem) && (
+              <button type="button" onClick={onGoToSettings} className="btn-primary text-xs">
+                Configurar Client ID / Item ID da Pluggy
+              </button>
+            )}
+          </div>
+        </div>
+
+        <div className="mt-4 flex flex-wrap items-center justify-between gap-3 border-t border-slate-800/80 pt-3 text-xs">
+          <label className="flex items-center gap-2 text-slate-300 cursor-pointer">
+            <input
+              type="checkbox"
+              checked={cleanDemoOnSync}
+              onChange={(e) => setCleanDemoOnSync(e.target.checked)}
+              className="rounded border-slate-600 bg-slate-900 text-emerald-500"
+            />
+            <span>
+              Substituir automaticamente os dados fictícios de demonstração ao sincronizar meus dados reais da Pluggy
+            </span>
+          </label>
+          {settings.pluggyItemId && (
+            <span className="font-mono text-[11px] text-slate-400">
+              Item ID ativo: <strong className="text-cyan-300">{settings.pluggyItemId}</strong>
+            </span>
+          )}
+        </div>
+
+        {pluggySyncError && (
+          <div className="mt-4 flex items-start gap-2 rounded-xl border border-rose-500/40 bg-rose-500/10 p-3.5 text-xs text-rose-200">
+            <AlertCircle className="mt-0.5 h-4 w-4 shrink-0 text-rose-400" />
+            <div>
+              <div className="font-bold text-rose-300">Falha ao buscar dados na Pluggy:</div>
+              <p className="mt-0.5">{pluggySyncError}</p>
+            </div>
+          </div>
+        )}
+
+        {pluggySyncLogs.length > 0 && (
+          <div className="mt-4 rounded-xl border border-emerald-500/30 bg-[#070B14] p-4 text-xs space-y-1">
+            <div className="font-bold text-emerald-400 mb-1">
+              Relatório da Última Sincronização Open Finance:
+            </div>
+            {pluggySyncLogs.map((log, i) => (
+              <div key={i} className="font-mono text-slate-300">
+                {log}
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+
+      {/* OFX/CSV & Holerite Mercedes-Benz Grid */}
       <div className="grid grid-cols-1 gap-6 lg:grid-cols-2">
-        {/* Banco do Brasil Ingestion */}
+        {/* Banco do Brasil File Ingestion */}
         <div className="glass-card p-6 space-y-4">
           <div className="flex items-start justify-between gap-3">
             <div className="flex items-center gap-3">
@@ -231,9 +402,11 @@ export const IngestionView: React.FC<IngestionViewProps> = ({
                 <FileSpreadsheet className="h-5 w-5" />
               </div>
               <div>
-                <h2 className="text-base font-bold text-white">Extrato Banco do Brasil (OFX / CSV / Open Finance)</h2>
+                <h2 className="text-base font-bold text-white">
+                  Importar Extrato BB (.OFX / .CSV)
+                </h2>
                 <p className="text-xs text-slate-400">
-                  Categorização automática e deduplicação por FITID
+                  Categorização inteligente e deduplicação automática por FITID
                 </p>
               </div>
             </div>
@@ -255,13 +428,13 @@ export const IngestionView: React.FC<IngestionViewProps> = ({
             </button>
           </div>
 
-          <label className="flex cursor-pointer flex-col items-center justify-center rounded-2xl border-2 border-dashed border-slate-700 bg-slate-950/60 p-6 text-center hover:border-emerald-500/60 hover:bg-slate-900/60 transition">
+          <label className="flex cursor-pointer flex-col items-center justify-center rounded-2xl border-2 border-dashed border-slate-700 bg-[#070B14]/70 p-6 text-center hover:border-emerald-500/60 hover:bg-slate-900/60 transition">
             <Upload className="mb-2 h-7 w-7 text-emerald-400" />
             <span className="text-sm font-semibold text-slate-200">
-              Arraste ou clique para selecionar arquivo .OFX ou .CSV do Banco do Brasil
+              Arraste ou selecione seu arquivo .OFX ou .CSV do Banco do Brasil
             </span>
             <span className="mt-1 text-xs text-slate-500">
-              Processado 100% no seu navegador — seus arquivos nunca vão para servidores externos
+              Processado 100% no seu navegador — nenhum arquivo sai do seu computador
             </span>
             <input
               type="file"
@@ -274,39 +447,6 @@ export const IngestionView: React.FC<IngestionViewProps> = ({
               }}
             />
           </label>
-
-          {/* Open Finance Pluggy */}
-          <div className="rounded-xl border border-slate-800 bg-slate-950/70 p-4">
-            <div className="flex flex-wrap items-center justify-between gap-2">
-              <div>
-                <div className="flex items-center gap-1.5 text-xs font-semibold text-cyan-300">
-                  <Link2 className="h-3.5 w-3.5" />
-                  Conector Open Finance (Pluggy API)
-                </div>
-                <p className="mt-0.5 text-[11px] text-slate-400">
-                  Sincronize movimentações do BB via API REST usando sua conta de desenvolvedor Pluggy.
-                </p>
-              </div>
-              {settings.pluggyClientId && settings.pluggyItemId ? (
-                <button
-                  type="button"
-                  onClick={handlePluggySync}
-                  disabled={pluggyLoading}
-                  className="btn-secondary py-1.5 text-xs"
-                >
-                  {pluggyLoading ? 'Sincronizando...' : 'Sincronizar BB Agora'}
-                </button>
-              ) : (
-                <button
-                  type="button"
-                  onClick={onGoToSettings}
-                  className="rounded-lg border border-slate-700 bg-slate-800 px-3 py-1.5 text-xs text-slate-300 hover:bg-slate-700"
-                >
-                  Configurar Pluggy
-                </button>
-              )}
-            </div>
-          </div>
 
           {bbStatus && (
             <div
@@ -326,7 +466,7 @@ export const IngestionView: React.FC<IngestionViewProps> = ({
           )}
 
           {bbDraft.length > 0 && (
-            <div className="space-y-3 rounded-xl border border-emerald-500/30 bg-slate-950/80 p-4">
+            <div className="space-y-3 rounded-xl border border-emerald-500/30 bg-[#070B14] p-4">
               <div className="flex items-center justify-between">
                 <span className="text-xs font-semibold text-emerald-300">
                   Pré-visualização ({bbDraft.length} lançamentos)
@@ -339,8 +479,12 @@ export const IngestionView: React.FC<IngestionViewProps> = ({
                   >
                     Cancelar
                   </button>
-                  <button type="button" onClick={handleConfirmBbImport} className="btn-primary py-1.5 text-xs">
-                    Confirmar Importação
+                  <button
+                    type="button"
+                    onClick={handleConfirmBbImport}
+                    className="btn-primary py-1.5 text-xs"
+                  >
+                    Confirmar Importação no SQLite
                   </button>
                 </div>
               </div>
@@ -358,7 +502,7 @@ export const IngestionView: React.FC<IngestionViewProps> = ({
                       </span>
                     </div>
                     <span
-                      className={`shrink-0 font-semibold ${
+                      className={`shrink-0 font-mono-num font-semibold ${
                         tx.type === 'income'
                           ? 'text-emerald-400'
                           : tx.type === 'investment'
@@ -384,7 +528,9 @@ export const IngestionView: React.FC<IngestionViewProps> = ({
                 <FileText className="h-5 w-5" />
               </div>
               <div>
-                <h2 className="text-base font-bold text-white">Holerite Corporativo Mercedes-Benz</h2>
+                <h2 className="text-base font-bold text-white">
+                  Holerite Corporativo Mercedes-Benz
+                </h2>
                 <p className="text-xs text-slate-400">
                   Parser PDF client-side (pdf.js) + Bookmarklet para Portal RH
                 </p>
@@ -404,7 +550,7 @@ export const IngestionView: React.FC<IngestionViewProps> = ({
             </button>
           </div>
 
-          <label className="flex cursor-pointer flex-col items-center justify-center rounded-2xl border-2 border-dashed border-slate-700 bg-slate-950/60 p-5 text-center hover:border-cyan-500/60 hover:bg-slate-900/60 transition">
+          <label className="flex cursor-pointer flex-col items-center justify-center rounded-2xl border-2 border-dashed border-slate-700 bg-[#070B14]/70 p-5 text-center hover:border-cyan-500/60 hover:bg-slate-900/60 transition">
             <Upload className="mb-2 h-6 w-6 text-cyan-400" />
             <span className="text-sm font-semibold text-slate-200">
               {pdfParsing
@@ -440,8 +586,14 @@ export const IngestionView: React.FC<IngestionViewProps> = ({
                 }}
                 className="inline-flex items-center gap-1 text-cyan-400 hover:text-cyan-300"
               >
-                {copiedBookmarklet ? <Check className="h-3.5 w-3.5" /> : <Copy className="h-3.5 w-3.5" />}
-                <span>{copiedBookmarklet ? 'Bookmarklet copiado!' : 'Copiar Bookmarklet RH'}</span>
+                {copiedBookmarklet ? (
+                  <Check className="h-3.5 w-3.5" />
+                ) : (
+                  <Copy className="h-3.5 w-3.5" />
+                )}
+                <span>
+                  {copiedBookmarklet ? 'Bookmarklet copiado!' : 'Copiar Bookmarklet RH'}
+                </span>
               </button>
             </div>
             <textarea
@@ -474,8 +626,10 @@ export const IngestionView: React.FC<IngestionViewProps> = ({
           )}
 
           {payslipDraft && (
-            <div className="space-y-3 rounded-xl border border-cyan-500/30 bg-slate-950/80 p-4 text-xs">
-              <div className="font-semibold text-cyan-300">Revisão Antes de Gravar no SQLite</div>
+            <div className="space-y-3 rounded-xl border border-cyan-500/30 bg-[#070B14] p-4 text-xs">
+              <div className="font-semibold text-cyan-300">
+                Revisão Antes de Gravar no SQLite
+              </div>
               <div className="grid grid-cols-2 gap-2.5 sm:grid-cols-3">
                 <div>
                   <label className="text-[11px] text-slate-400">Competência</label>
@@ -500,7 +654,10 @@ export const IngestionView: React.FC<IngestionViewProps> = ({
                     onChange={(e) =>
                       setPayslipDraft({
                         ...payslipDraft,
-                        payslip: { ...payslipDraft.payslip, grossSalary: Number(e.target.value) },
+                        payslip: {
+                          ...payslipDraft.payslip,
+                          grossSalary: Number(e.target.value),
+                        },
                       })
                     }
                     className="input-dark py-1.5 text-xs"
@@ -515,7 +672,10 @@ export const IngestionView: React.FC<IngestionViewProps> = ({
                     onChange={(e) =>
                       setPayslipDraft({
                         ...payslipDraft,
-                        payslip: { ...payslipDraft.payslip, netSalary: Number(e.target.value) },
+                        payslip: {
+                          ...payslipDraft.payslip,
+                          netSalary: Number(e.target.value),
+                        },
                       })
                     }
                     className="input-dark py-1.5 text-xs"
@@ -530,7 +690,10 @@ export const IngestionView: React.FC<IngestionViewProps> = ({
                     onChange={(e) =>
                       setPayslipDraft({
                         ...payslipDraft,
-                        payslip: { ...payslipDraft.payslip, inssAmount: Number(e.target.value) },
+                        payslip: {
+                          ...payslipDraft.payslip,
+                          inssAmount: Number(e.target.value),
+                        },
                       })
                     }
                     className="input-dark py-1.5 text-xs"
@@ -545,7 +708,10 @@ export const IngestionView: React.FC<IngestionViewProps> = ({
                     onChange={(e) =>
                       setPayslipDraft({
                         ...payslipDraft,
-                        payslip: { ...payslipDraft.payslip, irrfAmount: Number(e.target.value) },
+                        payslip: {
+                          ...payslipDraft.payslip,
+                          irrfAmount: Number(e.target.value),
+                        },
                       })
                     }
                     className="input-dark py-1.5 text-xs"
@@ -591,7 +757,11 @@ export const IngestionView: React.FC<IngestionViewProps> = ({
                 >
                   Descartar
                 </button>
-                <button type="button" onClick={handleSavePayslipDraft} className="btn-primary py-1.5 text-xs">
+                <button
+                  type="button"
+                  onClick={handleSavePayslipDraft}
+                  className="btn-primary py-1.5 text-xs"
+                >
                   Salvar Holerite no SQLite
                 </button>
               </div>
@@ -602,7 +772,10 @@ export const IngestionView: React.FC<IngestionViewProps> = ({
 
       {/* Lançamento Manual + Histórico de Holerites */}
       <div className="grid grid-cols-1 gap-6 lg:grid-cols-12">
-        <form onSubmit={handleSaveManualTx} className="glass-card p-6 space-y-4 lg:col-span-5">
+        <form
+          onSubmit={handleSaveManualTx}
+          className="glass-card p-6 space-y-4 lg:col-span-5"
+        >
           <div className="flex items-center gap-2">
             <Plus className="h-5 w-5 text-emerald-400" />
             <h3 className="text-base font-bold text-white">Lançamento Manual Rápido</h3>
@@ -625,7 +798,13 @@ export const IngestionView: React.FC<IngestionViewProps> = ({
                 onChange={(e) => {
                   const nextType = e.target.value as TransactionType;
                   setManualType(nextType);
-                  setManualCat(nextType === 'income' ? INCOME_CATEGORIES[0] : nextType === 'investment' ? 'Investimentos' : 'Alimentação');
+                  setManualCat(
+                    nextType === 'income'
+                      ? INCOME_CATEGORIES[0]
+                      : nextType === 'investment'
+                        ? 'Investimentos'
+                        : 'Alimentação',
+                  );
                 }}
                 className="input-dark text-xs"
               >
@@ -665,11 +844,13 @@ export const IngestionView: React.FC<IngestionViewProps> = ({
                 onChange={(e) => setManualCat(e.target.value)}
                 className="input-dark text-xs"
               >
-                {(manualType === 'income' ? INCOME_CATEGORIES : EXPENSE_CATEGORIES).map((c) => (
-                  <option key={c} value={c}>
-                    {c}
-                  </option>
-                ))}
+                {(manualType === 'income' ? INCOME_CATEGORIES : EXPENSE_CATEGORIES).map(
+                  (c) => (
+                    <option key={c} value={c}>
+                      {c}
+                    </option>
+                  ),
+                )}
               </select>
             </div>
           </div>
@@ -680,7 +861,9 @@ export const IngestionView: React.FC<IngestionViewProps> = ({
         </form>
 
         <div className="glass-card p-6 lg:col-span-7">
-          <h3 className="mb-3 text-base font-bold text-white">Holerites Mercedes-Benz Armazenados</h3>
+          <h3 className="mb-3 text-base font-bold text-white">
+            Holerites Mercedes-Benz Armazenados
+          </h3>
           <div className="overflow-x-auto">
             <table className="w-full text-left text-xs">
               <thead>
@@ -700,14 +883,16 @@ export const IngestionView: React.FC<IngestionViewProps> = ({
                       {p.competence}
                       <span className="block text-[10px] text-slate-500">{p.employer}</span>
                     </td>
-                    <td className="py-2.5 pr-3 text-right text-slate-300">{formatBRL(p.grossSalary)}</td>
-                    <td className="py-2.5 pr-3 text-right text-rose-400">
+                    <td className="py-2.5 pr-3 text-right font-mono-num text-slate-300">
+                      {formatBRL(p.grossSalary)}
+                    </td>
+                    <td className="py-2.5 pr-3 text-right font-mono-num text-rose-400">
                       -{formatBRL(p.inssAmount + p.irrfAmount)}
                     </td>
-                    <td className="py-2.5 pr-3 text-right text-cyan-400">
+                    <td className="py-2.5 pr-3 text-right font-mono-num text-cyan-400">
                       {formatBRL(p.privatePensionAmount)}
                     </td>
-                    <td className="py-2.5 pr-3 text-right font-bold text-emerald-400">
+                    <td className="py-2.5 pr-3 text-right font-mono-num font-bold text-emerald-400">
                       {formatBRL(p.netSalary)}
                     </td>
                     <td className="py-2.5 text-right">

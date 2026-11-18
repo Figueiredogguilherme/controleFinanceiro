@@ -6,6 +6,13 @@
   html {
     font-family: 'Inter', system-ui, -apple-system, sans-serif;
     scroll-behavior: smooth;
+    background-color: #070b14;
+    color: #f1f5f9;
+  }
+
+  .font-mono-num {
+    font-family: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+    font-variant-numeric: tabular-nums;
   }
 
   ::-webkit-scrollbar {
@@ -14,31 +21,47 @@
   }
 
   ::-webkit-scrollbar-track {
-    background: #0f172a;
+    background: #070b14;
   }
 
   ::-webkit-scrollbar-thumb {
-    background: #334155;
+    background: #1e293b;
     border-radius: 9999px;
   }
 
   ::-webkit-scrollbar-thumb:hover {
-    background: #475569;
+    background: #334155;
   }
 }
 
 .glass-card {
-  @apply bg-slate-900/80 border border-slate-800/90 backdrop-blur-md rounded-2xl shadow-xl;
+  @apply bg-[#0D1322]/95 border border-slate-800/80 backdrop-blur-md rounded-2xl shadow-xl shadow-black/30;
+}
+
+.glass-card-hover {
+  @apply bg-[#0D1322]/95 border border-slate-800/80 hover:border-slate-700/90 backdrop-blur-md rounded-2xl shadow-xl shadow-black/30 transition-all duration-200;
 }
 
 .input-dark {
-  @apply w-full rounded-xl bg-slate-950/90 border border-slate-700/80 px-3.5 py-2.5 text-sm text-slate-100 placeholder-slate-500 focus:outline-none focus:ring-2 focus:ring-emerald-500/50 focus:border-emerald-500 transition;
+  @apply w-full rounded-xl bg-[#070B14] border border-slate-700/80 px-3.5 py-2.5 text-sm text-slate-100 placeholder-slate-500 focus:outline-none focus:ring-2 focus:ring-emerald-500/40 focus:border-emerald-500 transition;
 }
 
 .btn-primary {
-  @apply inline-flex items-center justify-center gap-2 rounded-xl bg-emerald-600 hover:bg-emerald-500 active:bg-emerald-700 px-4 py-2.5 text-sm font-semibold text-white shadow-lg shadow-emerald-950/50 transition disabled:opacity-50 disabled:cursor-not-allowed;
+  @apply inline-flex items-center justify-center gap-2 rounded-xl bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-500 hover:to-teal-500 active:from-emerald-700 active:to-teal-700 px-4 py-2.5 text-sm font-semibold text-white shadow-lg shadow-emerald-950/60 transition disabled:opacity-50 disabled:cursor-not-allowed;
 }
 
 .btn-secondary {
-  @apply inline-flex items-center justify-center gap-2 rounded-xl bg-slate-800 hover:bg-slate-700 border border-slate-700 px-4 py-2.5 text-sm font-medium text-slate-200 transition disabled:opacity-50 disabled:cursor-not-allowed;
+  @apply inline-flex items-center justify-center gap-2 rounded-xl bg-slate-800/90 hover:bg-slate-700/90 border border-slate-700/80 px-4 py-2.5 text-sm font-medium text-slate-200 transition disabled:opacity-50 disabled:cursor-not-allowed;
+}
+
+.badge-emerald {
+  @apply inline-flex items-center gap-1.5 rounded-full border border-emerald-500/30 bg-emerald-500/10 px-2.5 py-0.5 text-xs font-medium text-emerald-300;
+}
+
+.badge-amber {
+  @apply inline-flex items-center gap-1.5 rounded-full border border-amber-500/30 bg-amber-500/10 px-2.5 py-0.5 text-xs font-medium text-amber-300;
+}
+
+.badge-cyan {
+  @apply inline-flex items-center gap-1.5 rounded-full border border-cyan-500/30 bg-cyan-500/10 px-2.5 py-0.5 text-xs font-medium text-cyan-300;
 }

@@ -2,6 +2,7 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   addPayslip,
   addTransactions,
+  applyPluggySyncToDatabase,
   clearAllFinancialData,
   computeFinancialSummary,
   deleteInvestment,
@@ -9,13 +10,16 @@ import {
   deleteTransaction,
   exportDatabaseAsJsonString,
   exportDatabaseBytes,
+  getBankAccounts,
   getBudgetGoals,
   getInvestments,
   getPayslips,
   getSettings,
   getTransactions,
+  hasDemoSeedData,
   importDatabaseBytes,
   initDatabase,
+  removeDemoSeedData,
   resetToSeedDatabase,
   saveSettings,
   updateTransactionCategory,
@@ -33,8 +37,11 @@ import {
   requestGoogleDriveAccessToken,
   updateDatabaseFile,
 } from './services/googleDrive';
+import { syncBancoDoBrasilViaPluggy } from './services/openFinancePluggy';
+import { fetchLiveBcbMacroRates } from './services/bcbApi';
 import {
   AppSettings,
+  BankAccount,
   BudgetGoal,
   DriveSyncState,
   Investment,
@@ -50,7 +57,7 @@ import { SimulatorView } from './components/SimulatorView';
 import { AiAdvisorView } from './components/AiAdvisorView';
 import { SettingsView } from './components/SettingsView';
 import { DriveSyncModal } from './components/DriveSyncModal';
-import { Cloud, ExternalLink } from 'lucide-react';
+import { CheckCircle2, Cloud, ExternalLink, AlertCircle, X } from 'lucide-react';
 
 function triggerDownload(blob: Blob, filename: string): void {
   const url = URL.createObjectURL(blob);
@@ -69,11 +76,25 @@ export function App(): React.ReactElement {
   const [activeTab, setActiveTab] = useState<ActiveTab>('dashboard');
   const [driveModalOpen, setDriveModalOpen] = useState(false);
 
+  const [bankAccounts, setBankAccounts] = useState<BankAccount[]>([]);
   const [transactions, setTransactions] = useState<Transaction[]>([]);
   const [payslips, setPayslips] = useState<Payslip[]>([]);
   const [investments, setInvestments] = useState<Investment[]>([]);
   const [budgetGoals, setBudgetGoals] = useState<BudgetGoal[]>([]);
   const [settings, setSettings] = useState<AppSettings | null>(null);
+  const [isDemoDataPresent, setIsDemoDataPresent] = useState(false);
+
+  // Pluggy Sync state
+  const [isSyncingPluggy, setIsSyncingPluggy] = useState(false);
+  const [pluggySyncLogs, setPluggySyncLogs] = useState<string[]>([]);
+  const [pluggySyncError, setPluggySyncError] = useState<string | null>(null);
+  const [toastBanner, setToastBanner] = useState<{
+    type: 'ok' | 'err';
+    text: string;
+  } | null>(null);
+
+  // BCB Macro state
+  const [isRefreshingBcb, setIsRefreshingBcb] = useState(false);
 
   const [hasUnsavedLocalChanges, setHasUnsavedLocalChanges] = useState(false);
   const [driveState, setDriveState] = useState<DriveSyncState>({
@@ -88,12 +109,15 @@ export function App(): React.ReactElement {
   });
 
   const syncTimerRef = useRef<number | null>(null);
+  const autoPluggyTriedRef = useRef(false);
 
   const refreshStateFromDb = useCallback(() => {
+    setBankAccounts(getBankAccounts());
     setTransactions(getTransactions());
     setPayslips(getPayslips());
     setInvestments(getInvestments());
     setBudgetGoals(getBudgetGoals());
+    setIsDemoDataPresent(hasDemoSeedData());
     const nextSettings = getSettings();
     setSettings(nextSettings);
     setDriveState((prev) => ({
@@ -101,6 +125,7 @@ export function App(): React.ReactElement {
       folderId: nextSettings.driveFolderId,
       fileName: nextSettings.driveFileName,
     }));
+    return nextSettings;
   }, []);
 
   useEffect(() => {
@@ -129,7 +154,8 @@ export function App(): React.ReactElement {
           ...prev,
           status: 'disconnected',
           accessToken: null,
-          errorMessage: 'Sessão OAuth expirada. Clique em Conectar Google Drive para renovar.',
+          errorMessage:
+            'Sessão OAuth expirada. Clique em Conectar Google Drive para renovar.',
         }));
         return;
       }
@@ -161,7 +187,10 @@ export function App(): React.ReactElement {
         setDriveState((prev) => ({
           ...prev,
           status: 'error',
-          errorMessage: err instanceof Error ? err.message : 'Falha ao sincronizar com Google Drive.',
+          errorMessage:
+            err instanceof Error
+              ? err.message
+              : 'Falha ao sincronizar com Google Drive.',
         }));
       }
     },
@@ -184,19 +213,108 @@ export function App(): React.ReactElement {
         uploadCurrentSnapshotToDrive();
       }, 1500);
     }
-  }, [refreshStateFromDb, driveState.status, driveState.accessToken, settings?.autoSyncDrive, uploadCurrentSnapshotToDrive]);
+  }, [
+    refreshStateFromDb,
+    driveState.status,
+    driveState.accessToken,
+    settings?.autoSyncDrive,
+    uploadCurrentSnapshotToDrive,
+  ]);
+
+  const handleRunPluggySync = useCallback(
+    async (
+      overrideSettings?: Partial<AppSettings>,
+      removeDemoFirst: boolean = true,
+    ) => {
+      const cfg = { ...(settings ?? getSettings()), ...(overrideSettings ?? {}) };
+      setIsSyncingPluggy(true);
+      setPluggySyncError(null);
+      try {
+        const res = await syncBancoDoBrasilViaPluggy({
+          clientId: cfg.pluggyClientId,
+          clientSecret: cfg.pluggyClientSecret,
+          itemId: cfg.pluggyItemId,
+        });
+
+        const applied = await applyPluggySyncToDatabase(res, removeDemoFirst);
+        const summaryLog = `✓ Gravado no SQLite: ${applied.accountsUpdated} conta(s), ${applied.transactionsInserted} nova(s) transação(ões) (${applied.transactionsSkipped} já existentes) e ${applied.investmentsUpdated} ativo(s) de investimento.`;
+
+        setPluggySyncLogs([...res.logs, summaryLog]);
+        markDbMutated();
+        setToastBanner({
+          type: 'ok',
+          text: `Pluggy sincronizado! ${applied.accountsUpdated} conta(s), ${applied.transactionsInserted} transações e ${applied.investmentsUpdated} investimentos atualizados.`,
+        });
+        setTimeout(() => setToastBanner(null), 6000);
+      } catch (err) {
+        const errMsg =
+          err instanceof Error
+            ? err.message
+            : 'Erro ao sincronizar dados com a Pluggy.';
+        setPluggySyncError(errMsg);
+        setToastBanner({
+          type: 'err',
+          text: errMsg,
+        });
+      } finally {
+        setIsSyncingPluggy(false);
+      }
+    },
+    [settings, markDbMutated],
+  );
+
+  // Auto-fetch Pluggy if credentials are saved in DB but never synced yet
+  useEffect(() => {
+    if (!ready || !settings || autoPluggyTriedRef.current) return;
+    if (
+      settings.pluggyClientId.trim() &&
+      settings.pluggyClientSecret.trim() &&
+      settings.pluggyItemId.trim() &&
+      !settings.lastPluggySyncAt
+    ) {
+      autoPluggyTriedRef.current = true;
+      handleRunPluggySync(settings, true);
+    }
+  }, [ready, settings, handleRunPluggySync]);
+
+  const handleRefreshBcbRates = useCallback(async () => {
+    if (!settings) return;
+    setIsRefreshingBcb(true);
+    try {
+      const live = await fetchLiveBcbMacroRates({
+        selic: settings.benchmarkSelic,
+        cdi: settings.benchmarkCdi,
+        ipca: settings.benchmarkIpca,
+      });
+      await saveSettings({
+        benchmarkSelic: live.selic,
+        benchmarkCdi: live.cdi,
+        benchmarkIpca: live.ipca12m,
+      });
+      markDbMutated();
+      setToastBanner({
+        type: 'ok',
+        text: `Taxas BCB atualizadas: Selic ${live.selic}% · CDI ${live.cdi}% · IPCA ${live.ipca12m}%`,
+      });
+      setTimeout(() => setToastBanner(null), 4000);
+    } finally {
+      setIsRefreshingBcb(false);
+    }
+  }, [settings, markDbMutated]);
 
   const handleConnectDrive = async () => {
-    if (!settings) return;
+    const currentCfg = getSettings();
     setDriveState((prev) => ({ ...prev, status: 'connecting', errorMessage: null }));
     try {
-      const { accessToken, expiresAt } = await requestGoogleDriveAccessToken(settings.googleClientId);
+      const { accessToken, expiresAt } = await requestGoogleDriveAccessToken(
+        currentCfg.googleClientId,
+      );
       const userInfo = await fetchDriveUserInfo(accessToken);
 
       const syncRes = await loadOrInitializeDatabaseFromDrive({
         accessToken,
-        folderId: settings.driveFolderId,
-        fileName: settings.driveFileName,
+        folderId: currentCfg.driveFolderId,
+        fileName: currentCfg.driveFileName,
         localSnapshot: exportDatabaseBytes(),
       });
 
@@ -208,7 +326,7 @@ export function App(): React.ReactElement {
       setHasUnsavedLocalChanges(false);
       setDriveState({
         status: 'connected',
-        folderId: settings.driveFolderId,
+        folderId: currentCfg.driveFolderId,
         fileId: syncRes.file.id,
         fileName: syncRes.file.name,
         lastSyncedAt: new Date().toISOString(),
@@ -217,11 +335,17 @@ export function App(): React.ReactElement {
         accessToken,
         tokenExpiresAt: expiresAt,
       });
+      setToastBanner({
+        type: 'ok',
+        text: `Conectado ao Google Drive (${syncRes.file.name} na pasta ${currentCfg.driveFolderId}).`,
+      });
+      setTimeout(() => setToastBanner(null), 5000);
     } catch (err) {
       setDriveState((prev) => ({
         ...prev,
         status: 'error',
-        errorMessage: err instanceof Error ? err.message : 'Erro ao conectar no Google Drive.',
+        errorMessage:
+          err instanceof Error ? err.message : 'Erro ao conectar no Google Drive.',
       }));
     }
   };
@@ -230,7 +354,10 @@ export function App(): React.ReactElement {
     if (!driveState.accessToken || !driveState.fileId) return;
     setDriveState((prev) => ({ ...prev, status: 'syncing', errorMessage: null }));
     try {
-      const bytes = await downloadDatabaseFile(driveState.accessToken, driveState.fileId);
+      const bytes = await downloadDatabaseFile(
+        driveState.accessToken,
+        driveState.fileId,
+      );
       await importDatabaseBytes(bytes);
       refreshStateFromDb();
       setHasUnsavedLocalChanges(false);
@@ -243,7 +370,8 @@ export function App(): React.ReactElement {
       setDriveState((prev) => ({
         ...prev,
         status: 'error',
-        errorMessage: err instanceof Error ? err.message : 'Erro ao baixar banco do Drive.',
+        errorMessage:
+          err instanceof Error ? err.message : 'Erro ao baixar banco do Drive.',
       }));
     }
   };
@@ -273,15 +401,18 @@ export function App(): React.ReactElement {
   };
 
   const summary = useMemo(
-    () => computeFinancialSummary(transactions, payslips, investments),
-    [transactions, payslips, investments],
+    () =>
+      computeFinancialSummary(transactions, payslips, investments, bankAccounts),
+    [transactions, payslips, investments, bankAccounts],
   );
 
   if (initError) {
     return (
-      <div className="flex min-h-screen items-center justify-center bg-slate-950 p-6 text-center">
+      <div className="flex min-h-screen items-center justify-center bg-[#070B14] p-6 text-center">
         <div className="glass-card max-w-md p-6 space-y-3">
-          <h1 className="text-lg font-bold text-rose-400">Falha ao iniciar banco SQLite</h1>
+          <h1 className="text-lg font-bold text-rose-400">
+            Falha ao iniciar banco SQLite
+          </h1>
           <p className="text-xs text-slate-300">{initError}</p>
         </div>
       </div>
@@ -290,34 +421,87 @@ export function App(): React.ReactElement {
 
   if (!ready || !settings) {
     return (
-      <div className="flex min-h-screen items-center justify-center bg-slate-950">
+      <div className="flex min-h-screen items-center justify-center bg-[#070B14]">
         <div className="text-center space-y-2">
           <div className="mx-auto h-8 w-8 animate-spin rounded-full border-2 border-emerald-500 border-t-transparent" />
-          <p className="text-xs text-slate-400">Carregando motor SQLite WebAssembly...</p>
+          <p className="text-xs text-slate-400">
+            Inicializando motor SQLite WebAssembly...
+          </p>
         </div>
       </div>
     );
   }
 
+  const isPluggyConfigured = Boolean(
+    settings.pluggyClientId.trim() &&
+      settings.pluggyClientSecret.trim() &&
+      settings.pluggyItemId.trim(),
+  );
+
   return (
-    <div className="min-h-screen bg-slate-950 text-slate-100 flex flex-col">
+    <div className="min-h-screen bg-[#070B14] text-slate-100 flex flex-col">
       <Navbar
         activeTab={activeTab}
         onSelectTab={setActiveTab}
         driveState={driveState}
+        settings={settings}
         onOpenDriveModal={() => setDriveModalOpen(true)}
         onQuickSyncDrive={() => uploadCurrentSnapshotToDrive()}
+        onQuickSyncPluggy={() => handleRunPluggySync(undefined, true)}
+        isSyncingPluggy={isSyncingPluggy}
+        onRefreshBcbRates={handleRefreshBcbRates}
+        isRefreshingBcb={isRefreshingBcb}
         hasUnsavedLocalChanges={hasUnsavedLocalChanges}
       />
 
-      <main className="mx-auto w-full max-w-7xl flex-1 px-4 py-6 sm:px-6">
+      {/* Global Toast Notification */}
+      {toastBanner && (
+        <div className="mx-auto mt-4 w-full max-w-[1440px] px-4 sm:px-6">
+          <div
+            className={`flex items-center justify-between gap-3 rounded-xl border px-4 py-3 text-xs shadow-lg ${
+              toastBanner.type === 'ok'
+                ? 'border-emerald-500/40 bg-emerald-500/15 text-emerald-200'
+                : 'border-rose-500/40 bg-rose-500/15 text-rose-200'
+            }`}
+          >
+            <div className="flex items-center gap-2">
+              {toastBanner.type === 'ok' ? (
+                <CheckCircle2 className="h-4 w-4 shrink-0 text-emerald-400" />
+              ) : (
+                <AlertCircle className="h-4 w-4 shrink-0 text-rose-400" />
+              )}
+              <span className="font-medium">{toastBanner.text}</span>
+            </div>
+            <button
+              type="button"
+              onClick={() => setToastBanner(null)}
+              className="rounded-lg p-1 hover:bg-black/20"
+            >
+              <X className="h-3.5 w-3.5" />
+            </button>
+          </div>
+        </div>
+      )}
+
+      <main className="mx-auto w-full max-w-[1440px] flex-1 px-4 py-6 sm:px-6">
         {activeTab === 'dashboard' && (
           <DashboardView
             summary={summary}
+            bankAccounts={bankAccounts}
             transactions={transactions}
             payslips={payslips}
             investments={investments}
             budgetGoals={budgetGoals}
+            isDemoDataPresent={isDemoDataPresent}
+            isPluggyConfigured={isPluggyConfigured}
+            isSyncingPluggy={isSyncingPluggy}
+            lastPluggySyncAt={settings.lastPluggySyncAt}
+            onSyncPluggyNow={() => handleRunPluggySync(undefined, true)}
+            onRemoveDemoData={async () => {
+              await removeDemoSeedData();
+              markDbMutated();
+            }}
+            onNavigateToTab={setActiveTab}
             onUpdateTransactionCategory={async (id, cat) => {
               await updateTransactionCategory(id, cat);
               markDbMutated();
@@ -333,12 +517,27 @@ export function App(): React.ReactElement {
           <IngestionView
             settings={settings}
             payslips={payslips}
+            isSyncingPluggy={isSyncingPluggy}
+            pluggySyncLogs={pluggySyncLogs}
+            pluggySyncError={pluggySyncError}
+            onRunPluggyFullSync={(removeDemoFirst) =>
+              handleRunPluggySync(undefined, removeDemoFirst)
+            }
+            onSavePluggyItemIdAndSync={async (newItemId) => {
+              const updated = await saveSettings({ pluggyItemId: newItemId });
+              markDbMutated();
+              await handleRunPluggySync(updated, true);
+            }}
             onImportTransactions={async (items) => {
               const res = await addTransactions(items);
               if (res.inserted > 0) markDbMutated();
               return res;
             }}
-            onAddPayslip={async (payslip: Omit<Payslip, 'id' | 'createdAt' | 'items'>, items: Omit<PayslipItem, 'id' | 'payslipId'>[], alsoCreateTx: boolean) => {
+            onAddPayslip={async (
+              payslip: Omit<Payslip, 'id' | 'createdAt' | 'items'>,
+              items: Omit<PayslipItem, 'id' | 'payslipId'>[],
+              alsoCreateTx: boolean,
+            ) => {
               const created = await addPayslip(payslip, items, alsoCreateTx);
               markDbMutated();
               return created;
@@ -365,7 +564,9 @@ export function App(): React.ReactElement {
           />
         )}
 
-        {activeTab === 'simulator' && <SimulatorView settings={settings} summary={summary} />}
+        {activeTab === 'simulator' && (
+          <SimulatorView settings={settings} summary={summary} />
+        )}
 
         {activeTab === 'ai' && (
           <AiAdvisorView
@@ -383,16 +584,30 @@ export function App(): React.ReactElement {
           <SettingsView
             settings={settings}
             budgetGoals={budgetGoals}
+            isSyncingPluggy={isSyncingPluggy}
+            pluggySyncLogs={pluggySyncLogs}
+            pluggySyncError={pluggySyncError}
             onSaveSettings={async (next) => {
               await saveSettings(next);
               markDbMutated();
             }}
+            onSaveAndSyncPluggy={async (nextSettings, removeDemoFirst) => {
+              const merged = await saveSettings(nextSettings);
+              markDbMutated();
+              await handleRunPluggySync(merged, removeDemoFirst);
+            }}
+            onConnectDriveNow={handleConnectDrive}
+            onRefreshBcbRates={handleRefreshBcbRates}
             onUpsertBudgetGoal={async (category, limit) => {
               await upsertBudgetGoal(category, limit);
               markDbMutated();
             }}
             onExportDb={handleExportLocalDb}
             onExportJson={handleExportJson}
+            onRemoveDemoData={async () => {
+              await removeDemoSeedData();
+              markDbMutated();
+            }}
             onResetSeed={async () => {
               await resetToSeedDatabase();
               markDbMutated();
@@ -405,8 +620,8 @@ export function App(): React.ReactElement {
         )}
       </main>
 
-      <footer className="border-t border-slate-900 bg-slate-950/90 py-4 px-4 text-xs text-slate-500">
-        <div className="mx-auto flex max-w-7xl flex-col items-center justify-between gap-2 sm:flex-row">
+      <footer className="border-t border-slate-900 bg-[#070B14] py-4 px-4 text-xs text-slate-500">
+        <div className="mx-auto flex max-w-[1440px] flex-col items-center justify-between gap-2 sm:flex-row">
           <div className="flex items-center gap-2">
             <Cloud className="h-3.5 w-3.5 text-emerald-500" />
             <span>

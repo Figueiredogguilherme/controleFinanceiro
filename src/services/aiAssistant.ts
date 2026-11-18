@@ -153,44 +153,41 @@ export function generateProactiveInsights(params: {
   const { summary, transactions, payslips, investments, budgetGoals } = params;
   const insights: ProactiveInsight[] = [];
 
-  // 1. Taxa de Poupança
   if (summary.monthlyIncome > 0) {
     if (summary.savingsRate >= 25) {
       insights.push({
         id: 'ins-savings-strong',
         severity: 'good',
         title: `Taxa de poupança sólida: ${formatPercent(summary.savingsRate, 1)}`,
-        message: `Você está retendo cerca de ${formatBRL(summary.monthlyIncome - summary.monthlyExpenses)} sobre sua receita mensal líquida. Esse ritmo acelera sua independência financeira.`,
+        message: `Você está retendo cerca de ${formatBRL(summary.monthlyIncome - summary.monthlyExpenses)} sobre sua receita mensal líquida (${summary.activeMonthLabel}). Esse ritmo acelera sua independência financeira.`,
       });
     } else if (summary.savingsRate < 15) {
       insights.push({
         id: 'ins-savings-low',
         severity: 'warning',
-        title: `Margem de poupança apertada (${formatPercent(summary.savingsRate, 1)})`,
+        title: `Margem de poupança em ${formatPercent(summary.savingsRate, 1)} (${summary.activeMonthLabel})`,
         message:
           'Suas despesas mensais no Banco do Brasil estão consumindo mais de 85% das entradas líquidas. Tente mirar em pelo menos 20% de aporte mensal recorrente.',
       });
     }
   }
 
-  // 2. Reserva de Emergência
   if (summary.emergencyFundMonths >= 6) {
     insights.push({
       id: 'ins-emergency-ok',
       severity: 'good',
       title: `Reserva de emergência robusta (${summary.emergencyFundMonths.toFixed(1).replace('.', ',')} meses)`,
-      message: `Você possui ${formatBRL(summary.liquidReserves)} em ativos de liquidez diária (Tesouro Selic / CDB DI), cobrindo mais de 6 meses do seu padrão de gastos.`,
+      message: `Você possui ${formatBRL(summary.liquidReserves)} em caixa + ativos de liquidez diária (Tesouro Selic / CDB DI), cobrindo mais de 6 meses do seu padrão de gastos.`,
     });
   } else {
     insights.push({
       id: 'ins-emergency-warn',
       severity: 'warning',
       title: `Reserva de liquidez em ${summary.emergencyFundMonths.toFixed(1).replace('.', ',')} meses`,
-      message: `Seus ativos com liquidez diária somam ${formatBRL(summary.liquidReserves)}. Priorize completar 6 meses de despesas antes de aumentar risco em renda variável ou cripto.`,
+      message: `Seus recursos de liquidez imediata somam ${formatBRL(summary.liquidReserves)}. Priorize completar 6 meses de despesas antes de aumentar risco em renda variável.`,
     });
   }
 
-  // 3. Análise Fiscal do Holerite Mercedes-Benz (PGBL)
   const latestPayslip = payslips[0] ?? null;
   const fiscal = analyzePayslipFiscalOpportunity(latestPayslip);
   if (fiscal && latestPayslip) {
@@ -204,9 +201,7 @@ export function generateProactiveInsights(params: {
     }
   }
 
-  // 4. Metas de Orçamento do mês mais recente
-  const months = Array.from(new Set(transactions.map((t) => t.date.slice(0, 7)))).sort();
-  const latestMonth = months[months.length - 1];
+  const latestMonth = summary.activeMonthLabel;
   if (latestMonth) {
     const spentByCat = new Map<string, number>();
     transactions
@@ -228,7 +223,6 @@ export function generateProactiveInsights(params: {
     }
   }
 
-  // 5. Alocação da Carteira & Marcação a Mercado
   if (summary.totalPortfolioValue > 0) {
     const rfTotal = investments
       .filter((i) => i.assetClass.startsWith('renda_fixa'))
@@ -268,7 +262,7 @@ function buildContextPrompt(params: {
   const catTotals = new Map<string, number>();
   transactions
     .filter((t) => t.type === 'expense')
-    .slice(0, 60)
+    .slice(0, 80)
     .forEach((t) => {
       catTotals.set(t.category, (catTotals.get(t.category) ?? 0) + t.amount);
     });
@@ -286,13 +280,14 @@ function buildContextPrompt(params: {
     )
     .join('\n');
 
-  return `Você é um Consultor de Finanças Pessoais e Investimentos brasileiro, técnico e didático.
-Responda em Português do Brasil, com clareza, explicando conceitos econômicos (como CDI, IPCA+, marcação a mercado, P/L, IR regressivo, PGBL) sempre de forma simples e objetiva.
+  return `Você é um Consultor Sênior de Finanças Pessoais e Investimentos brasileiro, técnico e didático.
+Responda em Português do Brasil, com clareza, explicando conceitos econômicos (como CDI, IPCA+, marcação a mercado, P/L, IR regressivo, PGBL) sempre de forma simples, estruturada e objetiva.
 
 CONTEXTO FINANCEIRO ATUAL DO USUÁRIO (${settings.userName}):
 - Parâmetros Macro: Selic ${settings.benchmarkSelic}% a.a. | CDI ${settings.benchmarkCdi}% a.a. | IPCA ${settings.benchmarkIpca}% a.a.
+- Saldo em Contas Correntes BB: ${formatBRL(summary.totalBankBalance)} | Fatura Cartões: ${formatBRL(summary.totalCreditCardDebt)} | Patrimônio Líquido Total: ${formatBRL(summary.netWorth)}.
 - Último Holerite (${latestPay?.employer ?? 'Mercedes-Benz'} - ${latestPay?.competence ?? 'N/A'}): Bruto ${formatBRL(latestPay?.grossSalary ?? 0)}, INSS ${formatBRL(latestPay?.inssAmount ?? 0)}, IRRF ${formatBRL(latestPay?.irrfAmount ?? 0)}, Previdência Privada ${formatBRL(latestPay?.privatePensionAmount ?? 0)}, Líquido ${formatBRL(latestPay?.netSalary ?? 0)}.
-- Fluxo de Caixa Mês Recente (BB): Receita ${formatBRL(summary.monthlyIncome)} | Despesas ${formatBRL(summary.monthlyExpenses)} | Taxa de Poupança ${formatPercent(summary.savingsRate, 1)}.
+- Fluxo de Caixa Mês Recente (${summary.activeMonthLabel}): Receita ${formatBRL(summary.monthlyIncome)} | Despesas ${formatBRL(summary.monthlyExpenses)} | Taxa de Poupança ${formatPercent(summary.savingsRate, 1)}.
 - Maiores Categorias de Despesa Recentes: ${topCategories || 'Sem despesas'}.
 - Reserva de Liquidez Diária: ${formatBRL(summary.liquidReserves)} (~${summary.emergencyFundMonths.toFixed(1)} meses de despesas).
 - Patrimônio Investido Total: ${formatBRL(summary.totalPortfolioValue)} (Custo: ${formatBRL(summary.totalPortfolioInvested)}, Lucro: ${formatBRL(summary.portfolioGain)}).
@@ -330,7 +325,7 @@ function buildLocalFallbackAnswer(
   if (q.includes('holerite') || q.includes('mercedes') || q.includes('irrf') || q.includes('pgbl')) {
     const latest = payslips[0];
     if (!latest) {
-      return 'Nenhum holerite da Mercedes-Benz foi importado ainda. Vá até a aba **Ingestão de Dados** para carregar o PDF ou gerar um demonstrativo de teste.';
+      return 'Nenhum holerite da Mercedes-Benz foi importado ainda. Vá até a aba **Holerite MB & Extrato BB** para carregar o PDF ou gerar um demonstrativo de teste.';
     }
     const fiscal = analyzePayslipFiscalOpportunity(latest);
     return `**Análise do Holerite ${latest.employer} (${latest.competence}):**\n- **Salário Bruto:** ${formatBRL(latest.grossSalary)}\n- **Descontos:** ${formatBRL(latest.totalDeductions)} (INSS ${formatBRL(latest.inssAmount)} + IRRF ${formatBRL(latest.irrfAmount)} + Previdência ${formatBRL(latest.privatePensionAmount)})\n- **Salário Líquido:** ${formatBRL(latest.netSalary)}\n\n${
@@ -340,7 +335,170 @@ function buildLocalFallbackAnswer(
     }`;
   }
 
-  return `**Resumo Analítico Local (Modo Offline / Sem Chave LLM):**\n\nSeu patrimônio investido atual é de **${formatBRL(summary.totalPortfolioValue)}** (ganho acumulado de **${formatBRL(summary.portfolioGain)}**), com reserva de liquidez cobrindo **${summary.emergencyFundMonths.toFixed(1)} meses** de despesas e taxa de poupança de **${formatPercent(summary.savingsRate, 1)}**.\n\nPara respostas conversacionais avançadas sobre sua carteira, configure sua chave gratuita do **Google Gemini** ou **OpenAI** na aba **Configurações** (ela fica salva apenas no seu arquivo SQLite no Google Drive). Você também pode perguntar aqui sobre termos como *CDI*, *IPCA+*, *Marcação a Mercado*, *P/L*, *PGBL*, *FGC* ou *IOF*.`;
+  return `**Resumo Analítico Local (Sem Chave Externa Ativa):**\n\nSeu patrimônio líquido consolidado é de **${formatBRL(summary.netWorth)}** (Carteira de Investimentos: **${formatBRL(summary.totalPortfolioValue)}**, Saldo Bancário: **${formatBRL(summary.totalBankBalance)}**), com reserva de liquidez cobrindo **${summary.emergencyFundMonths.toFixed(1)} meses** de despesas e taxa de poupança de **${formatPercent(summary.savingsRate, 1)}**.\n\nPara respostas conversacionais ilimitadas sobre sua carteira, ative sua chave gratuita do **Google Gemini** na aba **Conexões & Guias** (leva 30 segundos no Google AI Studio).`;
+}
+
+async function discoverAvailableGeminiModel(
+  apiKey: string,
+  preferredModel: string,
+): Promise<string> {
+  try {
+    const res = await fetch(
+      `https://generativelanguage.googleapis.com/v1beta/models?key=${encodeURIComponent(apiKey)}`,
+    );
+    if (!res.ok) return preferredModel;
+    const data = (await res.json()) as {
+      models?: { name: string; supportedGenerationMethods?: string[] }[];
+    };
+    const available = (data.models ?? [])
+      .filter((m) =>
+        (m.supportedGenerationMethods ?? []).includes('generateContent'),
+      )
+      .map((m) => m.name.replace(/^models\//, ''));
+
+    if (available.includes(preferredModel)) return preferredModel;
+
+    const priorityOrder = [
+      'gemini-3.8-flash',
+      'gemini-3.5-flash-lite',
+      'gemini-4-argon',
+      'gemini-2.5-flash',
+      'gemini-2.0-flash',
+    ];
+    for (const candidate of priorityOrder) {
+      const match = available.find((a) => a === candidate || a.startsWith(candidate));
+      if (match) return match;
+    }
+    return available.find((a) => a.includes('gemini')) || preferredModel;
+  } catch {
+    return preferredModel;
+  }
+}
+
+async function callGeminiGenerateContent(params: {
+  apiKey: string;
+  model: string;
+  contents: { role: string; parts: { text: string }[] }[];
+}): Promise<{ text: string; modelUsed: string }> {
+  const { apiKey, model, contents } = params;
+
+  const tryCall = async (targetModel: string) => {
+    const url = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(
+      targetModel,
+    )}:generateContent?key=${encodeURIComponent(apiKey)}`;
+
+    return fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        contents,
+      }),
+    });
+  };
+
+  let usedModel = model.trim() || 'gemini-3.8-flash';
+  let res = await tryCall(usedModel);
+
+  // Caso o modelo específico retorne 404 na conta do usuário, descobre automaticamente um modelo compatível
+  if (res.status === 404 || res.status === 400) {
+    const discovered = await discoverAvailableGeminiModel(apiKey, usedModel);
+    if (discovered !== usedModel) {
+      usedModel = discovered;
+      res = await tryCall(usedModel);
+    }
+  }
+
+  if (!res.ok) {
+    const errText = await res.text();
+    throw new Error(`Erro na API Gemini (${res.status}): ${errText}`);
+  }
+
+  const data = (await res.json()) as {
+    candidates?: { content?: { parts?: { text?: string }[] } }[];
+  };
+  const text = data.candidates?.[0]?.content?.parts
+    ?.map((p) => p.text ?? '')
+    .join('')
+    .trim();
+
+  if (!text) {
+    throw new Error('A API Gemini retornou uma resposta vazia.');
+  }
+  return { text, modelUsed: usedModel };
+}
+
+export async function testAiProviderConnection(settings: AppSettings): Promise<{
+  ok: boolean;
+  providerUsed: string;
+  sampleReply: string;
+}> {
+  if (settings.llmProvider === 'gemini') {
+    if (!settings.geminiApiKey.trim()) {
+      throw new Error('Informe sua Google Gemini API Key antes de testar.');
+    }
+    const { text, modelUsed } = await callGeminiGenerateContent({
+      apiKey: settings.geminiApiKey.trim(),
+      model: settings.geminiModel.trim() || 'gemini-3.8-flash',
+      contents: [
+        {
+          role: 'user',
+          parts: [
+            {
+              text: 'Responda em uma única frase curta em português confirmando que a conexão com o Consultor Financeiro está ativa.',
+            },
+          ],
+        },
+      ],
+    });
+    return {
+      ok: true,
+      providerUsed: `Google Gemini (${modelUsed})`,
+      sampleReply: text,
+    };
+  }
+
+  if (settings.llmProvider === 'openai') {
+    if (!settings.openaiApiKey.trim()) {
+      throw new Error('Informe sua OpenAI API Key antes de testar.');
+    }
+    const model = settings.openaiModel.trim() || 'gpt-4o-mini';
+    const res = await fetch('https://api.openai.com/v1/chat/completions', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${settings.openaiApiKey.trim()}`,
+      },
+      body: JSON.stringify({
+        model,
+        messages: [
+          {
+            role: 'user',
+            content:
+              'Responda em uma única frase curta em português confirmando que a conexão com o Consultor Financeiro está ativa.',
+          },
+        ],
+      }),
+    });
+    if (!res.ok) {
+      const errText = await res.text();
+      throw new Error(`Erro na API OpenAI (${res.status}): ${errText}`);
+    }
+    const data = (await res.json()) as {
+      choices?: { message?: { content?: string } }[];
+    };
+    return {
+      ok: true,
+      providerUsed: `OpenAI (${model})`,
+      sampleReply: data.choices?.[0]?.message?.content ?? 'Conexão OpenAI verificada!',
+    };
+  }
+
+  return {
+    ok: true,
+    providerUsed: 'Motor Analítico Local',
+    sampleReply:
+      'Modo Analítico Local ativo! Para usar IA generativa completa, selecione Google Gemini ou OpenAI e insira sua chave.',
+  };
 }
 
 export async function askFinancialAssistant(params: {
@@ -355,10 +513,15 @@ export async function askFinancialAssistant(params: {
   const { question, history, settings } = params;
   const systemContext = buildContextPrompt(params);
 
-  if (settings.llmProvider === 'gemini' && settings.geminiApiKey.trim()) {
-    const model = settings.geminiModel.trim() || 'gemini-2.5-flash';
-    const url = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent?key=${encodeURIComponent(settings.geminiApiKey.trim())}`;
+  // Se o usuário preencheu a chave Gemini mesmo esquecendo de mudar o seletor de local_only, usa Gemini automaticamente
+  const effectiveProvider =
+    settings.llmProvider === 'local_only' && settings.geminiApiKey.trim()
+      ? 'gemini'
+      : settings.llmProvider === 'local_only' && settings.openaiApiKey.trim()
+        ? 'openai'
+        : settings.llmProvider;
 
+  if (effectiveProvider === 'gemini' && settings.geminiApiKey.trim()) {
     const contents = [
       ...history.slice(-6).map((h) => ({
         role: h.role === 'assistant' ? 'model' : 'user',
@@ -370,34 +533,16 @@ export async function askFinancialAssistant(params: {
       },
     ];
 
-    const res = await fetch(url, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        contents,
-        generationConfig: {
-          temperature: 0.4,
-          maxOutputTokens: 1200,
-        },
-      }),
+    const { text, modelUsed } = await callGeminiGenerateContent({
+      apiKey: settings.geminiApiKey.trim(),
+      model: settings.geminiModel,
+      contents,
     });
 
-    if (!res.ok) {
-      const errText = await res.text();
-      throw new Error(`Erro na API Gemini (${res.status}): ${errText}`);
-    }
-
-    const data = (await res.json()) as {
-      candidates?: { content?: { parts?: { text?: string }[] } }[];
-    };
-    const text = data.candidates?.[0]?.content?.parts?.[0]?.text;
-    if (!text) {
-      throw new Error('A API Gemini retornou uma resposta vazia.');
-    }
-    return { answer: text, providerUsed: `Google Gemini (${model})` };
+    return { answer: text, providerUsed: `Google Gemini (${modelUsed})` };
   }
 
-  if (settings.llmProvider === 'openai' && settings.openaiApiKey.trim()) {
+  if (effectiveProvider === 'openai' && settings.openaiApiKey.trim()) {
     const model = settings.openaiModel.trim() || 'gpt-4o-mini';
     const res = await fetch('https://api.openai.com/v1/chat/completions', {
       method: 'POST',
@@ -407,7 +552,6 @@ export async function askFinancialAssistant(params: {
       },
       body: JSON.stringify({
         model,
-        temperature: 0.4,
         messages: [
           { role: 'system', content: systemContext },
           ...history.slice(-6),

@@ -1,6 +1,7 @@
 import initSqlJs, { Database, SqlJsStatic } from 'sql.js';
 import {
   AppSettings,
+  BankAccount,
   BudgetGoal,
   DataSource,
   FinancialSummary,
@@ -10,6 +11,7 @@ import {
   Transaction,
 } from '../types/finance';
 import { DEFAULT_DB_FILENAME, DEFAULT_DRIVE_FOLDER_ID } from './googleDrive';
+import { PluggySyncResult } from './openFinancePluggy';
 
 const IDB_NAME = 'controle_financeiro_sqlite_store';
 const IDB_STORE = 'sqlite_blobs';
@@ -25,17 +27,31 @@ export const DEFAULT_SETTINGS: AppSettings = {
   autoSyncDrive: true,
   llmProvider: 'local_only',
   geminiApiKey: '',
-  geminiModel: 'gemini-2.5-flash',
+  geminiModel: 'gemini-3.8-flash',
   openaiApiKey: '',
   openaiModel: 'gpt-4o-mini',
   pluggyClientId: '',
   pluggyClientSecret: '',
   pluggyItemId: '',
+  lastPluggySyncAt: '',
   benchmarkSelic: 11.75,
   benchmarkCdi: 11.65,
   benchmarkIpca: 4.5,
   userName: 'Guilherme',
 };
+
+const DEMO_INV_IDS = [
+  'inv-tesouro-selic',
+  'inv-tesouro-ipca-2035',
+  'inv-cdb-bb-110',
+  'inv-lci-bb',
+  'inv-hglg11',
+  'inv-mxrf11',
+  'inv-wege3',
+  'inv-bbas3',
+  'inv-mbprev',
+  'inv-btc',
+];
 
 function openIndexedDb(): Promise<IDBDatabase> {
   return new Promise((resolve, reject) => {
@@ -110,6 +126,21 @@ async function ensureSqlModule(): Promise<SqlJsStatic> {
 function createSchema(db: Database): void {
   db.run(`
     PRAGMA foreign_keys = ON;
+
+    CREATE TABLE IF NOT EXISTS bank_accounts (
+      id TEXT PRIMARY KEY,
+      name TEXT NOT NULL,
+      institution TEXT NOT NULL,
+      type TEXT NOT NULL,
+      subtype TEXT,
+      number TEXT,
+      balance REAL NOT NULL DEFAULT 0,
+      credit_limit REAL,
+      available_credit_limit REAL,
+      currency_code TEXT NOT NULL DEFAULT 'BRL',
+      source TEXT NOT NULL DEFAULT 'manual',
+      updated_at TEXT NOT NULL
+    );
 
     CREATE TABLE IF NOT EXISTS transactions (
       id TEXT PRIMARY KEY,
@@ -197,12 +228,71 @@ function seedInitialData(db: Database): void {
 
   // Settings
   const upsertSetting = db.prepare('INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)');
-  (Object.entries(DEFAULT_SETTINGS) as [keyof AppSettings, string | number | boolean][]).forEach(
-    ([k, v]) => {
+  (
+    Object.entries(DEFAULT_SETTINGS) as [
+      keyof AppSettings,
+      string | number | boolean | undefined,
+    ][]
+  ).forEach(([k, v]) => {
+    if (v !== undefined) {
       upsertSetting.run([k, String(v)]);
-    },
-  );
+    }
+  });
   upsertSetting.free();
+
+  // Seed Demo Bank Accounts
+  const demoAccounts: BankAccount[] = [
+    {
+      id: 'acc-demo-bb-cc',
+      name: 'Conta Corrente BB Estilo (Exemplo)',
+      institution: 'Banco do Brasil',
+      type: 'BANK',
+      subtype: 'CHECKING_ACCOUNT',
+      number: '12345-6',
+      balance: 8420.5,
+      currencyCode: 'BRL',
+      source: 'demo',
+      updatedAt: now,
+    },
+    {
+      id: 'acc-demo-bb-card',
+      name: 'Ourocard Visa Infinite (Exemplo)',
+      institution: 'Banco do Brasil',
+      type: 'CREDIT',
+      subtype: 'CREDIT_CARD',
+      number: 'Final 8842',
+      balance: 1845.2,
+      creditLimit: 35000,
+      availableCreditLimit: 33154.8,
+      currencyCode: 'BRL',
+      source: 'demo',
+      updatedAt: now,
+    },
+  ];
+
+  const insertAcc = db.prepare(`
+    INSERT INTO bank_accounts (
+      id, name, institution, type, subtype, number, balance,
+      credit_limit, available_credit_limit, currency_code, source, updated_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `);
+  demoAccounts.forEach((a) => {
+    insertAcc.run([
+      a.id,
+      a.name,
+      a.institution,
+      a.type,
+      a.subtype ?? null,
+      a.number ?? null,
+      a.balance,
+      a.creditLimit ?? null,
+      a.availableCreditLimit ?? null,
+      a.currencyCode,
+      a.source,
+      a.updatedAt,
+    ]);
+  });
+  insertAcc.free();
 
   // Seed Payslips (Mercedes-Benz do Brasil - últimos 3 meses)
   const payslips: Omit<Payslip, 'items'>[] = [
@@ -212,7 +302,7 @@ function seedInitialData(db: Database): void {
       paymentDate: '2026-09-30',
       employer: 'Mercedes-Benz do Brasil Ltda.',
       employeeName: 'Guilherme',
-      role: 'Engenheiro / Analista Sênior',
+      role: 'Engenheiro / Especialista Sênior',
       grossSalary: 14200,
       totalDeductions: 3892.4,
       netSalary: 10307.6,
@@ -231,7 +321,7 @@ function seedInitialData(db: Database): void {
       paymentDate: '2026-10-30',
       employer: 'Mercedes-Benz do Brasil Ltda.',
       employeeName: 'Guilherme',
-      role: 'Engenheiro / Analista Sênior',
+      role: 'Engenheiro / Especialista Sênior',
       grossSalary: 14650,
       totalDeductions: 4035.15,
       netSalary: 10614.85,
@@ -250,7 +340,7 @@ function seedInitialData(db: Database): void {
       paymentDate: '2026-11-05',
       employer: 'Mercedes-Benz do Brasil Ltda.',
       employeeName: 'Guilherme',
-      role: 'Engenheiro / Analista Sênior',
+      role: 'Engenheiro / Especialista Sênior',
       grossSalary: 14650,
       totalDeductions: 4035.15,
       netSalary: 10614.85,
@@ -300,7 +390,7 @@ function seedInitialData(db: Database): void {
       p.createdAt,
     ]);
 
-    const baseSal = idx === 0 ? 14200 : 14200;
+    const baseSal = 14200;
     const extra = idx === 0 ? 0 : 450;
 
     const items: PayslipItem[] = [
@@ -391,7 +481,6 @@ function seedInitialData(db: Database): void {
 
   // Seed Transactions (Banco do Brasil Conta Corrente)
   const transactions: Transaction[] = [
-    // Setembro 2026
     {
       id: 'tx-bb-sal-2026-09',
       date: '2026-09-30',
@@ -464,7 +553,6 @@ function seedInitialData(db: Database): void {
       fitid: 'BB20260925006',
       createdAt: now,
     },
-    // Outubro 2026
     {
       id: 'tx-bb-sal-2026-10',
       date: '2026-10-30',
@@ -549,7 +637,6 @@ function seedInitialData(db: Database): void {
       fitid: 'BB20261024007',
       createdAt: now,
     },
-    // Novembro 2026 (mês corrente)
     {
       id: 'tx-bb-sal-2026-11',
       date: '2026-11-05',
@@ -923,7 +1010,9 @@ function seedInitialData(db: Database): void {
     { id: 'goal-educacao', category: 'Educação', monthlyLimit: 500 },
   ];
 
-  const insertGoal = db.prepare('INSERT INTO budget_goals (id, category, monthly_limit) VALUES (?, ?, ?)');
+  const insertGoal = db.prepare(
+    'INSERT INTO budget_goals (id, category, monthly_limit) VALUES (?, ?, ?)',
+  );
   goals.forEach((g) => insertGoal.run([g.id, g.category, g.monthlyLimit]));
   insertGoal.free();
 }
@@ -998,11 +1087,32 @@ export async function clearAllFinancialData(): Promise<void> {
     await initDatabase();
   }
   dbInstance!.run(`
+    DELETE FROM bank_accounts;
     DELETE FROM payslip_items;
     DELETE FROM payslips;
     DELETE FROM transactions;
     DELETE FROM investments;
   `);
+  await persistLocalSnapshot();
+}
+
+export function hasDemoSeedData(): boolean {
+  const rows = queryObjects<{ cnt: number }>(
+    `SELECT COUNT(*) as cnt FROM transactions WHERE id LIKE 'tx-bb-%'`,
+  );
+  return (rows[0]?.cnt ?? 0) > 0;
+}
+
+export async function removeDemoSeedData(): Promise<void> {
+  if (!dbInstance) {
+    await initDatabase();
+  }
+  dbInstance!.run(`DELETE FROM bank_accounts WHERE source = 'demo' OR id LIKE 'acc-demo-%';`);
+  dbInstance!.run(`DELETE FROM transactions WHERE id LIKE 'tx-bb-%';`);
+  dbInstance!.run(`DELETE FROM payslip_items WHERE payslip_id LIKE 'pay-mb-2026-%';`);
+  dbInstance!.run(`DELETE FROM payslips WHERE id LIKE 'pay-mb-2026-%';`);
+  const placeholders = DEMO_INV_IDS.map(() => '?').join(',');
+  dbInstance!.run(`DELETE FROM investments WHERE id IN (${placeholders});`, DEMO_INV_IDS);
   await persistLocalSnapshot();
 }
 
@@ -1026,6 +1136,12 @@ export function getSettings(): AppSettings {
   const rows = queryObjects<{ key: string; value: string }>('SELECT key, value FROM settings');
   const map = new Map(rows.map((r) => [r.key, r.value]));
 
+  const savedGeminiModel = map.get('geminiModel') || DEFAULT_SETTINGS.geminiModel;
+  const upgradedGeminiModel =
+    savedGeminiModel === 'gemini-2.5-flash' || savedGeminiModel === 'gemini-2.0-flash'
+      ? 'gemini-3.8-flash'
+      : savedGeminiModel;
+
   return {
     googleClientId: map.get('googleClientId') ?? DEFAULT_SETTINGS.googleClientId,
     driveFolderId: map.get('driveFolderId') || DEFAULT_SETTINGS.driveFolderId,
@@ -1034,12 +1150,13 @@ export function getSettings(): AppSettings {
     llmProvider:
       (map.get('llmProvider') as AppSettings['llmProvider']) ?? DEFAULT_SETTINGS.llmProvider,
     geminiApiKey: map.get('geminiApiKey') ?? '',
-    geminiModel: map.get('geminiModel') || DEFAULT_SETTINGS.geminiModel,
+    geminiModel: upgradedGeminiModel,
     openaiApiKey: map.get('openaiApiKey') ?? '',
     openaiModel: map.get('openaiModel') || DEFAULT_SETTINGS.openaiModel,
     pluggyClientId: map.get('pluggyClientId') ?? '',
     pluggyClientSecret: map.get('pluggyClientSecret') ?? '',
     pluggyItemId: map.get('pluggyItemId') ?? '',
+    lastPluggySyncAt: map.get('lastPluggySyncAt') ?? '',
     benchmarkSelic: Number(map.get('benchmarkSelic') ?? DEFAULT_SETTINGS.benchmarkSelic),
     benchmarkCdi: Number(map.get('benchmarkCdi') ?? DEFAULT_SETTINGS.benchmarkCdi),
     benchmarkIpca: Number(map.get('benchmarkIpca') ?? DEFAULT_SETTINGS.benchmarkIpca),
@@ -1054,12 +1171,130 @@ export async function saveSettings(next: Partial<AppSettings>): Promise<AppSetti
   const current = getSettings();
   const merged: AppSettings = { ...current, ...next };
   const stmt = dbInstance!.prepare('INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)');
-  (Object.entries(merged) as [keyof AppSettings, string | number | boolean][]).forEach(([k, v]) => {
-    stmt.run([k, String(v)]);
+  (
+    Object.entries(merged) as [
+      keyof AppSettings,
+      string | number | boolean | undefined,
+    ][]
+  ).forEach(([k, v]) => {
+    if (v !== undefined) {
+      stmt.run([k, String(v)]);
+    }
   });
   stmt.free();
   await persistLocalSnapshot();
   return merged;
+}
+
+export function getBankAccounts(): BankAccount[] {
+  const rows = queryObjects<{
+    id: string;
+    name: string;
+    institution: string;
+    type: BankAccount['type'];
+    subtype: string | null;
+    number: string | null;
+    balance: number;
+    credit_limit: number | null;
+    available_credit_limit: number | null;
+    currency_code: string;
+    source: BankAccount['source'];
+    updated_at: string;
+  }>('SELECT * FROM bank_accounts ORDER BY type ASC, balance DESC');
+
+  return rows.map((r) => ({
+    id: r.id,
+    name: r.name,
+    institution: r.institution,
+    type: r.type,
+    subtype: r.subtype ?? undefined,
+    number: r.number ?? undefined,
+    balance: Number(r.balance),
+    creditLimit: r.credit_limit !== null ? Number(r.credit_limit) : undefined,
+    availableCreditLimit:
+      r.available_credit_limit !== null ? Number(r.available_credit_limit) : undefined,
+    currencyCode: r.currency_code || 'BRL',
+    source: r.source,
+    updatedAt: r.updated_at,
+  }));
+}
+
+export async function upsertBankAccounts(
+  accounts: Omit<BankAccount, 'updatedAt'>[],
+): Promise<void> {
+  if (!dbInstance) {
+    await initDatabase();
+  }
+  const now = new Date().toISOString();
+  const stmt = dbInstance!.prepare(`
+    INSERT OR REPLACE INTO bank_accounts (
+      id, name, institution, type, subtype, number, balance,
+      credit_limit, available_credit_limit, currency_code, source, updated_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `);
+  for (const a of accounts) {
+    stmt.run([
+      a.id,
+      a.name,
+      a.institution,
+      a.type,
+      a.subtype ?? null,
+      a.number ?? null,
+      a.balance,
+      a.creditLimit ?? null,
+      a.availableCreditLimit ?? null,
+      a.currencyCode || 'BRL',
+      a.source,
+      now,
+    ]);
+  }
+  stmt.free();
+  await persistLocalSnapshot();
+}
+
+export async function applyPluggySyncToDatabase(
+  result: PluggySyncResult,
+  removeDemoDataFirst: boolean = true,
+): Promise<{
+  accountsUpdated: number;
+  transactionsInserted: number;
+  transactionsSkipped: number;
+  investmentsUpdated: number;
+}> {
+  if (!dbInstance) {
+    await initDatabase();
+  }
+
+  if (
+    removeDemoDataFirst &&
+    hasDemoSeedData() &&
+    (result.accounts.length > 0 ||
+      result.transactions.length > 0 ||
+      result.investments.length > 0)
+  ) {
+    await removeDemoSeedData();
+  }
+
+  if (result.accounts.length > 0) {
+    await upsertBankAccounts(result.accounts);
+  }
+
+  const txStats = await addTransactions(result.transactions);
+
+  for (const inv of result.investments) {
+    await upsertInvestment(inv);
+  }
+
+  await saveSettings({
+    lastPluggySyncAt: new Date().toISOString(),
+  });
+
+  return {
+    accountsUpdated: result.accounts.length,
+    transactionsInserted: txStats.inserted,
+    transactionsSkipped: txStats.skippedDuplicates,
+    investmentsUpdated: result.investments.length,
+  };
 }
 
 export function getTransactions(): Transaction[] {
@@ -1092,7 +1327,9 @@ export function getTransactions(): Transaction[] {
   }));
 }
 
-export async function addTransactions(newItems: Omit<Transaction, 'id' | 'createdAt'>[]): Promise<{
+export async function addTransactions(
+  newItems: Omit<Transaction, 'id' | 'createdAt'>[],
+): Promise<{
   inserted: number;
   skippedDuplicates: number;
 }> {
@@ -1102,7 +1339,9 @@ export async function addTransactions(newItems: Omit<Transaction, 'id' | 'create
   const existing = getTransactions();
   const existingFitids = new Set(existing.map((t) => t.fitid).filter(Boolean));
   const existingKeys = new Set(
-    existing.map((t) => `${t.date}|${t.amount.toFixed(2)}|${t.description.trim().toUpperCase()}`),
+    existing.map(
+      (t) => `${t.date}|${t.amount.toFixed(2)}|${t.description.trim().toUpperCase()}`,
+    ),
   );
 
   const stmt = dbInstance!.prepare(`
@@ -1122,7 +1361,11 @@ export async function addTransactions(newItems: Omit<Transaction, 'id' | 'create
       continue;
     }
 
-    const id = `tx-${crypto.randomUUID ? crypto.randomUUID() : `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`}`;
+    const id = `tx-${
+      crypto.randomUUID
+        ? crypto.randomUUID()
+        : `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
+    }`;
     stmt.run([
       id,
       item.date,
@@ -1148,7 +1391,10 @@ export async function addTransactions(newItems: Omit<Transaction, 'id' | 'create
   return { inserted, skippedDuplicates };
 }
 
-export async function updateTransactionCategory(id: string, category: string): Promise<void> {
+export async function updateTransactionCategory(
+  id: string,
+  category: string,
+): Promise<void> {
   if (!dbInstance) return;
   dbInstance.run('UPDATE transactions SET category = ? WHERE id = ?', [category, id]);
   await persistLocalSnapshot();
@@ -1391,7 +1637,8 @@ export async function upsertInvestment(
   if (!dbInstance) {
     await initDatabase();
   }
-  const id = inv.id || `inv-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`;
+  const id =
+    inv.id || `inv-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`;
   const now = new Date().toISOString();
   dbInstance!.run(
     `INSERT OR REPLACE INTO investments (
@@ -1439,7 +1686,10 @@ export function getBudgetGoals(): BudgetGoal[] {
   }));
 }
 
-export async function upsertBudgetGoal(category: string, monthlyLimit: number): Promise<void> {
+export async function upsertBudgetGoal(
+  category: string,
+  monthlyLimit: number,
+): Promise<void> {
   if (!dbInstance) return;
   const id = `goal-${category.toLowerCase().replace(/[^a-z0-9]/g, '-')}`;
   dbInstance.run(
@@ -1453,6 +1703,7 @@ export function computeFinancialSummary(
   transactions: Transaction[],
   payslips: Payslip[],
   investments: Investment[],
+  bankAccounts: BankAccount[] = [],
 ): FinancialSummary {
   const months = Array.from(new Set(transactions.map((t) => t.date.slice(0, 7)))).sort();
   const latestMonth = months[months.length - 1] ?? new Date().toISOString().slice(0, 7);
@@ -1461,6 +1712,7 @@ export function computeFinancialSummary(
   let totalExpenses = 0;
   let monthlyIncome = 0;
   let monthlyExpenses = 0;
+  let monthlyInvestments = 0;
 
   transactions.forEach((t) => {
     if (t.type === 'income') {
@@ -1469,11 +1721,30 @@ export function computeFinancialSummary(
     } else if (t.type === 'expense') {
       totalExpenses += t.amount;
       if (t.date.startsWith(latestMonth)) monthlyExpenses += t.amount;
+    } else if (t.type === 'investment' && t.date.startsWith(latestMonth)) {
+      monthlyInvestments += t.amount;
     }
   });
 
+  // Se o mês corrente ainda não tiver receita lançada no extrato mas houver holerite recente, usa o líquido como referência
+  const effectiveMonthlyIncome =
+    monthlyIncome > 0 ? monthlyIncome : (payslips[0]?.netSalary ?? 0);
+
   const savingsRate =
-    monthlyIncome > 0 ? Math.max(-100, ((monthlyIncome - monthlyExpenses) / monthlyIncome) * 100) : 0;
+    effectiveMonthlyIncome > 0
+      ? Math.max(
+          -100,
+          ((effectiveMonthlyIncome - monthlyExpenses) / effectiveMonthlyIncome) * 100,
+        )
+      : 0;
+
+  const totalBankBalance = bankAccounts
+    .filter((a) => a.type === 'BANK')
+    .reduce((acc, a) => acc + a.balance, 0);
+
+  const totalCreditCardDebt = bankAccounts
+    .filter((a) => a.type === 'CREDIT')
+    .reduce((acc, a) => acc + Math.abs(a.balance), 0);
 
   const totalPortfolioValue = investments.reduce((acc, i) => acc + i.currentValue, 0);
   const totalPortfolioInvested = investments.reduce((acc, i) => acc + i.totalInvested, 0);
@@ -1481,38 +1752,51 @@ export function computeFinancialSummary(
   const portfolioGainPct =
     totalPortfolioInvested > 0 ? (portfolioGain / totalPortfolioInvested) * 100 : 0;
 
-  const liquidReserves = investments
-    .filter(
-      (i) =>
-        i.assetClass === 'renda_fixa_pos' &&
-        (i.liquidity.toLowerCase().includes('diária') || i.liquidity.toLowerCase().includes('d+0') || i.liquidity.toLowerCase().includes('d+1')),
-    )
-    .reduce((acc, i) => acc + i.currentValue, 0);
+  const liquidReserves =
+    totalBankBalance +
+    investments
+      .filter(
+        (i) =>
+          i.assetClass === 'renda_fixa_pos' &&
+          (i.liquidity.toLowerCase().includes('diária') ||
+            i.liquidity.toLowerCase().includes('d+0') ||
+            i.liquidity.toLowerCase().includes('d+1')),
+      )
+      .reduce((acc, i) => acc + i.currentValue, 0);
 
   const avgMonthlyExpense =
     months.length > 0 ? totalExpenses / months.length : Math.max(monthlyExpenses, 1);
 
-  const emergencyFundMonths = avgMonthlyExpense > 0 ? liquidReserves / avgMonthlyExpense : 0;
+  const emergencyFundMonths =
+    avgMonthlyExpense > 0 ? liquidReserves / avgMonthlyExpense : 0;
+
+  const netWorth = totalBankBalance + totalPortfolioValue - totalCreditCardDebt;
 
   return {
     totalIncome,
     totalExpenses,
-    monthlyIncome,
+    monthlyIncome: effectiveMonthlyIncome,
     monthlyExpenses,
+    monthlyInvestments,
     savingsRate,
+    totalBankBalance,
+    totalCreditCardDebt,
     totalPortfolioValue,
     totalPortfolioInvested,
     portfolioGain,
     portfolioGainPct,
+    netWorth,
     emergencyFundMonths,
     liquidReserves,
     latestPayslip: payslips[0] ?? null,
+    activeMonthLabel: latestMonth,
   };
 }
 
 export function exportDatabaseAsJsonString(): string {
   const payload = {
     exportedAt: new Date().toISOString(),
+    bankAccounts: getBankAccounts(),
     transactions: getTransactions(),
     payslips: getPayslips(),
     investments: getInvestments(),

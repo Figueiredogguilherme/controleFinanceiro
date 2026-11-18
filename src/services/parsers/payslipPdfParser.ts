@@ -14,9 +14,11 @@ function parseBrAmount(text: string): number {
 
 export async function extractTextFromPdfFile(file: File): Promise<string> {
   const pdfjsLib = await import('pdfjs-dist');
-  // Configura o worker local copiado em public/ para funcionar no Vite e GitHub Pages
   if (typeof window !== 'undefined') {
-    pdfjsLib.GlobalWorkerOptions.workerSrc = './pdf.worker.min.mjs';
+    pdfjsLib.GlobalWorkerOptions.workerSrc = new URL(
+      'pdf.worker.min.mjs',
+      document.baseURI,
+    ).href;
   }
   const buffer = await file.arrayBuffer();
   const loadingTask = pdfjsLib.getDocument({ data: new Uint8Array(buffer) });
@@ -64,6 +66,18 @@ function extractCompetence(text: string): string {
     outubro: '10',
     novembro: '11',
     dezembro: '12',
+    jan: '01',
+    fev: '02',
+    mar: '03',
+    abr: '04',
+    mai: '05',
+    jun: '06',
+    jul: '07',
+    ago: '08',
+    set: '09',
+    out: '10',
+    nov: '11',
+    dez: '12',
   };
 
   const mmYyyy = text.match(/\b(0[1-9]|1[0-2])\/(20\d{2})\b/);
@@ -72,7 +86,7 @@ function extractCompetence(text: string): string {
   }
 
   const monthWord = text.match(
-    /\b(janeiro|fevereiro|mar[cç]o|abril|maio|junho|julho|agosto|setembro|outubro|novembro|dezembro)\s*(?:de|\/)?\s*(20\d{2})\b/i,
+    /\b(janeiro|fevereiro|mar[cç]o|abril|maio|junho|julho|agosto|setembro|outubro|novembro|dezembro|jan|fev|mar|abr|mai|jun|jul|ago|set|out|nov|dez)\s*(?:de|\/|-)?\s*(20\d{2})\b/i,
   );
   if (monthWord) {
     const m = monthNames[monthWord[1].toLowerCase()] ?? '01';
@@ -116,28 +130,34 @@ export function parseMercedesPayslipText(
   const competence = extractCompetence(normalized);
   const paymentDate = extractPaymentDate(normalized, competence);
 
-  const employer = /mercedes[- ]?benz/i.test(normalized)
+  const employer = /mercedes[- ]?benz|daimler/i.test(normalized)
     ? 'Mercedes-Benz do Brasil Ltda.'
-    : 'Empregador Corporativo';
+    : 'Mercedes-Benz / Corporativo';
 
-  const employeeMatch = normalized.match(/(?:nome|funcion[aá]rio|colaborador)\s*:?\s*([A-ZÀ-Ú][A-Za-zÀ-ú\s]{2,45})/i);
-  const roleMatch = normalized.match(/(?:cargo|fun[cç][aã]o)\s*:?\s*([A-ZÀ-Ú][A-Za-zÀ-ú0-9\s/-]{2,45})/i);
+  const employeeMatch = normalized.match(
+    /(?:nome|funcion[aá]rio|colaborador)\s*:?\s*([A-ZÀ-Ú][A-Za-zÀ-ú\s]{2,45})/i,
+  );
+  const roleMatch = normalized.match(
+    /(?:cargo|fun[cç][aã]o)\s*:?\s*([A-ZÀ-Ú][A-Za-zÀ-ú0-9\s/-]{2,45})/i,
+  );
 
   const items: Omit<PayslipItem, 'id' | 'payslipId'>[] = [];
 
-  // Padrão de linhas com código + descrição + valor monetário brasileiro (ex: "0010 Salário Nominal 14.200,00")
   const lines = normalized.split('\n');
   for (const line of lines) {
     const clean = line.trim();
     if (!clean) continue;
 
-    // Ignora linhas de totais gerais para não duplicar como rubrica individual
-    if (/total\s+(?:de\s+)?(?:vencimentos|proventos|descontos)|l[ií]quido\s+a\s+receber|valor\s+l[ií]quido/i.test(clean)) {
+    if (
+      /total\s+(?:de\s+)?(?:vencimentos|proventos|descontos)|l[ií]quido\s+a\s+receber|valor\s+l[ií]quido/i.test(
+        clean,
+      )
+    ) {
       continue;
     }
 
     const rowMatch = clean.match(
-      /^(?:(\d{3,5})\s+)?([A-Za-zÀ-ú0-9\s./+-]{4,60}?)\s+(?:(\d+[,.]?\d*\s*[h%d]?)\s+)?(\d{1,3}(?:\.\d{3})*,\d{2})$/i,
+      /^(?:(\d{2,6})\s+)?([A-Za-zÀ-ú0-9\s./*()+-]{3,65}?)\s+(?:(\d+[,.]?\d*\s*[h%d]?)\s+)?(?:R\$\s*)?(\d{1,3}(?:\.\d{3})*,\d{2})$/i,
     );
     if (!rowMatch) continue;
 
@@ -152,7 +172,7 @@ export function parseMercedesPayslipText(
     if (/FGTS|BASE\s+(?:INSS|IRRF|FGTS)|MARGEM/i.test(upperDesc)) {
       kind = 'info';
     } else if (
-      /INSS|IRRF|IMPOSTO DE RENDA|PREVID|MBPREV|SAUDE|MEDICA|ODONTO|CONTRIBUICAO|VALE|DESCONTO|PENSAO|SINDICAL|SEGURO|EMPRESTIMO|FALTAS/i.test(
+      /INSS|I\.N\.S\.S|IRRF|I\.R\.R\.F|IMPOSTO DE RENDA|PREVID|MBPREV|SAUDE|MEDICA|ODONTO|CONTRIBUICAO|VALE|DESCONTO|PENSAO|SINDICAL|SEGURO|EMPRESTIMO|FALTAS|ADIANTAMENTO\s+DESC/i.test(
         upperDesc,
       )
     ) {
@@ -203,11 +223,11 @@ export function parseMercedesPayslipText(
   };
 
   const inssAmount = findRubric(
-    /\bINSS\b/i,
+    /\bINSS\b|I\.N\.S\.S/i,
     /INSS[^\d\n]{0,25}(\d{1,3}(?:\.\d{3})*,\d{2})/i,
   );
   const irrfAmount = findRubric(
-    /\bIRRF\b|IMPOSTO\s+DE\s+RENDA/i,
+    /\bIRRF\b|I\.R\.R\.F|IMPOSTO\s+DE\s+RENDA/i,
     /(?:IRRF|IMPOSTO\s+DE\s+RENDA)[^\d\n]{0,25}(\d{1,3}(?:\.\d{3})*,\d{2})/i,
   );
   const privatePensionAmount = findRubric(
@@ -223,7 +243,6 @@ export function parseMercedesPayslipText(
     /FGTS(?:\s+DO\s+M[EÊ]S)?[^\d\n]{0,30}(\d{1,3}(?:\.\d{3})*,\d{2})/i,
   );
 
-  // Caso não tenha extraído rubricas individuais mas tenha os totais
   if (items.length === 0 && grossSalary > 0) {
     items.push({
       code: '0010',

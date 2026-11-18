@@ -8,6 +8,21 @@ export type DataSource =
   | 'mercedes_bookmarklet'
   | 'manual';
 
+export interface BankAccount {
+  id: string;
+  name: string;
+  institution: string;
+  type: 'BANK' | 'CREDIT' | 'INVESTMENT';
+  subtype?: string;
+  number?: string;
+  balance: number;
+  creditLimit?: number;
+  availableCreditLimit?: number;
+  currencyCode: string;
+  source: 'pluggy' | 'manual' | 'demo';
+  updatedAt: string;
+}
+
 export interface Transaction {
   id: string;
   date: string; // YYYY-MM-DD
@@ -17,7 +32,7 @@ export interface Transaction {
   category: string;
   account: string;
   source: DataSource;
-  fitid?: string; // Identificador único OFX para deduplicação
+  fitid?: string; // Identificador único OFX/Pluggy para deduplicação
   notes?: string;
   createdAt: string;
 }
@@ -103,6 +118,7 @@ export interface AppSettings {
   pluggyClientId: string;
   pluggyClientSecret: string;
   pluggyItemId: string;
+  lastPluggySyncAt?: string;
   benchmarkSelic: number; // % a.a.
   benchmarkCdi: number; // % a.a.
   benchmarkIpca: number; // % a.a.
@@ -133,12 +149,17 @@ export interface FinancialSummary {
   totalExpenses: number;
   monthlyIncome: number;
   monthlyExpenses: number;
+  monthlyInvestments: number;
   savingsRate: number;
+  totalBankBalance: number;
+  totalCreditCardDebt: number;
   totalPortfolioValue: number;
   totalPortfolioInvested: number;
   portfolioGain: number;
   portfolioGainPct: number;
+  netWorth: number;
   emergencyFundMonths: number;
   liquidReserves: number;
   latestPayslip: Payslip | null;
+  activeMonthLabel: string;
 }
